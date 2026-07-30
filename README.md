@@ -15,6 +15,10 @@ AI-assisted reverse engineering for **Ghidra**: a **Qt (PySide6)** desktop app t
 **Optional:** an **agent** dock uses the **Anthropic** API when you add a key under **File -> Settings**. Ghidra is not bundled; you point RawView at your install (or ZIP URL) in settings.
 
 <p align="center">
+  <img src="assets/demo.gif" width="920" alt="RawView demo">
+</p>
+
+<p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL%20v3-blue" alt="GPL v3"></a>
   <img src="https://img.shields.io/badge/platform-Windows-blue" alt="Windows">
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
