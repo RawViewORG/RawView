@@ -204,7 +204,9 @@ class AgentBrain:
         ``messages.create`` rejects those requests). Do not fall back to create while
         ``thinking`` is present.
         """
-        thinking_on = params.get("thinking") is not None
+        # An explicit {"type": "disabled"} (Opus 5 / Sonnet 5) is thinking *off*: it must
+        # not suppress the non-streaming fallback the way a real thinking config does.
+        thinking_on = (params.get("thinking") or {}).get("type") not in (None, "disabled")
         if hasattr(self._client.messages, "stream"):
             try:
                 return self._messages_turn_stream(params), True
