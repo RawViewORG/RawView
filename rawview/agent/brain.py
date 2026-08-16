@@ -6,22 +6,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-import anthropic
-
-from rawview.agent.anthropic_backoff import (
-    AnthropicBackoffInterrupted,
-    messages_create_with_backoff,
-    messages_stream_with_backoff,
-)
-from rawview.agent.claude_model_limits import (
-    effort_for_model,
-    max_output_tokens_for_claude_model,
-    model_accepts_sampling_params,
-    model_rejects_disabled_thinking,
-    model_thinks_by_default,
-    model_uses_adaptive_thinking,
-)
 from rawview.agent.memory import ConversationMemory
+from rawview.agent.providers import LLMProvider, ProviderInterrupted
 from rawview.agent.tools import AgentBatchToolPort, anthropic_tool_list, run_tool
 from rawview.ghidra.api import GhidraAPI
 
@@ -73,171 +59,37 @@ def _expand_short_analyze_intent(text: str) -> str:
     return text
 
 
-def _block_to_api_dict(block: object) -> dict[str, Any] | None:
-    """Map SDK content block objects to Anthropic API-style dicts for message history."""
-    btype = getattr(block, "type", None)
-    if btype == "text":
-        return {"type": "text", "text": getattr(block, "text", "")}
-    if btype == "thinking":
-        d: dict[str, Any] = {"type": "thinking", "thinking": getattr(block, "thinking", "")}
-        sig = getattr(block, "signature", None)
-        if sig:
-            d["signature"] = sig
-        return d
-    if btype == "redacted_thinking":
-        return {"type": "redacted_thinking", "data": getattr(block, "data", "")}
-    if btype == "tool_use":
-        tid = getattr(block, "id", "")
-        name = getattr(block, "name", "")
-        raw_inp = getattr(block, "input", None) or {}
-        inp = dict(raw_inp) if isinstance(raw_inp, dict) else {}
-        return {"type": "tool_use", "id": tid, "name": name, "input": inp}
-    return None
-
-
 class AgentBrain:
-    """Anthropic tool loop with cooperative interrupt between turns."""
+    """Provider-agnostic tool loop with cooperative interrupt between turns.
+
+    The loop owns tool execution, transcript bookkeeping and UI events. Everything
+    vendor-specific - wire format, streaming, retries, sampling knobs - lives behind
+    :class:`~rawview.agent.providers.base.LLMProvider`.
+    """
 
     def __init__(
         self,
         *,
-        api_key: str,
-        model: str,
+        provider: LLMProvider,
         ghidra_api: GhidraAPI,
         memory: ConversationMemory,
         max_turns: int,
         on_navigate: Callable[[str], None],
         emit: EmitFn,
-        extended_thinking: bool = False,
-        thinking_budget_tokens: int = 4096,
-        temperature: float = 0.3,
-        effort: str = "medium",
         batch_port: AgentBatchToolPort | None = None,
     ) -> None:
-        self._client = anthropic.Anthropic(api_key=api_key)
-        self._model = model
+        self._provider = provider
         self._ghidra = ghidra_api
         self._memory = memory
         self._max_turns = max_turns
         self._on_navigate = on_navigate
         self._emit = emit
         self._batch_port = batch_port
-        self._extended_thinking = extended_thinking
-        self._thinking_budget_tokens = thinking_budget_tokens
-        self._temperature = float(temperature)
-        self._effort = effort if effort in ("low", "medium", "high", "xhigh", "max") else "medium"
         self._interrupt = threading.Event()
 
-    def _messages_turn_stream(self, params: dict[str, Any]) -> Any:
-        stream_cm = messages_stream_with_backoff(
-            self._client, self._emit, params, should_abort=lambda: self._interrupt.is_set()
-        )
-        acc: list[str] = []
-        stream_began = False
-        msg: Any = None
-        try:
-            with stream_cm as stream:
-                self._emit("assistant_stream_begin", {})
-                stream_began = True
-                # Unified event loop handles both text and thinking deltas.
-                for event in stream:
-                    if self._interrupt.is_set():
-                        # Return inside `with` — __exit__ closes the HTTP connection immediately.
-                        return None
-                    etype = getattr(event, "type", None)
-                    if etype != "content_block_delta":
-                        continue
-                    delta = getattr(event, "delta", None)
-                    if delta is None:
-                        continue
-                    dtype = getattr(delta, "type", None)
-                    if dtype == "text_delta":
-                        piece = getattr(delta, "text", "") or ""
-                        if piece:
-                            acc.append(piece)
-                            self._emit("assistant_text_delta", {"text": piece})
-                    elif dtype == "thinking_delta":
-                        piece = getattr(delta, "thinking", "") or ""
-                        if piece:
-                            self._emit("assistant_thinking_live", {"text": piece})
-                # True stop: do not call get_final_message (drains stream) if interrupted.
-                if self._interrupt.is_set():
-                    return None
-                try:
-                    msg = stream.get_final_message()
-                except Exception as ge:
-                    logger.warning("get_final_message after stream: %s", ge)
-                    if self._interrupt.is_set():
-                        return None
-                    raise
-        finally:
-            if stream_began:
-                self._emit("assistant_stream_end", {})
-        if self._interrupt.is_set():
-            return None
-        all_txt_parts: list[str] = []
-        if msg is not None:
-            for block in msg.content:
-                if getattr(block, "type", None) == "text":
-                    all_txt_parts.append(getattr(block, "text", "") or "")
-        merged = "".join(acc) if acc else "".join(all_txt_parts)
-        if not merged.strip():
-            merged = "".join(all_txt_parts)
-        # Emit committed thinking blocks before the assistant reply.
-        if msg is not None and params.get("thinking"):
-            for block in msg.content:
-                bt = getattr(block, "type", None)
-                if bt == "thinking":
-                    t = getattr(block, "thinking", "") or ""
-                    if t.strip():
-                        self._emit("assistant_thinking", {"text": t})
-                elif bt == "redacted_thinking":
-                    self._emit("assistant_thinking", {"text": "[redacted thinking block]"})
-        if merged.strip():
-            self._emit("assistant_stream_commit", {"text": merged})
-        return msg
-
-    def _messages_turn(self, params: dict[str, Any]) -> tuple[Any, bool]:
-        """Return (message, streamed_text). Falls back to non-streaming on recoverable stream errors.
-
-        Anthropic requires the streaming API when extended thinking is enabled (non-streaming
-        ``messages.create`` rejects those requests). Do not fall back to create while
-        ``thinking`` is present.
-        """
-        # An explicit {"type": "disabled"} (Opus 5 / Sonnet 5) is thinking *off*: it must
-        # not suppress the non-streaming fallback the way a real thinking config does.
-        thinking_on = (params.get("thinking") or {}).get("type") not in (None, "disabled")
-        if hasattr(self._client.messages, "stream"):
-            try:
-                return self._messages_turn_stream(params), True
-            except TypeError:
-                raise
-            except Exception as e:
-                if thinking_on:
-                    logger.warning(
-                        "Streaming failed while extended thinking was enabled (%s); "
-                        "will not fall back to non-streaming create (API forbids it with thinking).",
-                        e,
-                    )
-                    raise
-                logger.warning("Streaming request failed (%s); using non-streaming fallback", e)
-        elif thinking_on:
-            raise RuntimeError(
-                "Extended thinking requires client.messages.stream(); "
-                "this Anthropic SDK has no streaming Messages API."
-            )
-        msg = messages_create_with_backoff(
-            self._client, self._emit, params, should_abort=lambda: self._interrupt.is_set()
-        )
-        return msg, False
-
-    def _invoke_messages_turn(self, params: dict[str, Any]) -> tuple[Any, bool] | None:
-        """Like ``_messages_turn`` but returns ``None`` if the user stopped during Anthropic backoff waits."""
-        try:
-            return self._messages_turn(params)
-        except AnthropicBackoffInterrupted:
-            self._emit("agent_stopped", {"reason": "interrupt"})
-            return None
+    @property
+    def provider(self) -> LLMProvider:
+        return self._provider
 
     def interrupt(self) -> None:
         self._interrupt.set()
@@ -245,26 +97,12 @@ class AgentBrain:
     def clear_interrupt(self) -> None:
         self._interrupt.clear()
 
+    def close(self) -> None:
+        self._provider.close()
+
     def generate_chat_title(self, first_message: str) -> str:
-        """Generate a short 3-5 word chat title using Haiku. Returns empty string on any failure."""
-        try:
-            resp = self._client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=30,
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        "Give a 3-5 word title for a conversation starting with this message. "
-                        "Reply with ONLY the title, no quotes or punctuation:\n\n"
-                        + first_message[:400]
-                    ),
-                }],
-            )
-            if resp.content:
-                return resp.content[0].text.strip()[:60]
-        except Exception:
-            pass
-        return ""
+        """Short chat title; empty string on any failure."""
+        return self._provider.generate_title(first_message)
 
     def run_user_prompt(
         self,
@@ -311,16 +149,7 @@ You are RawView, the in-app reverse-engineering agent. You act on a live Ghidra 
 ## Tools: how you must call them
 You do **not** run Python, shell, or HTTP from here. Ghidra and the Work UI change only when **the host executes a tool** after you issue a proper tool call. Explaining what you "would" do in chat **does nothing** unless a matching tool actually runs.
 
-### Put yourself in the right mode
-1. You see a **tools** list in the request (each entry: tool `name`, human-readable `description`, machine `input_schema`). That list is the **only** callable function names - no hidden APIs.
-2. Whenever you need **fresh data** from the binary (functions, strings, decompilation, xrefs, …), your next assistant turn should include a **`tool_use`** payload for that data. Guessing addresses or pasting fake JSON "results" in chat is a failure mode.
-3. Each call is one object with **exactly two** fields you control: **`name`** (string, must match a tool `name` character-for-character) and **`input`** (a JSON **object** of arguments). This is **Anthropic's shape**, not OpenAI's: there is **no** `function` wrapper, **no** `arguments` string field - only `name` + `input` as a parsed object. If your habits say "arguments", translate them into **`input`** here.
-
-### What you emit (concretely)
-- Your assistant message may contain normal **`text`** blocks (optional) plus one or more **`tool_use`** blocks. Only **`tool_use`** triggers execution.
-- For every `tool_use`: set **`name`** to the tool identifier (e.g. `list_functions`, never `ListFunctions` or `list-functions`). Set **`input`** to a flat JSON object whose keys are **exactly** the property names from `input_schema` (`address`, not `addr` or `Address`). Include every **required** key; optional keys may be omitted.
-- For tools with no parameters, **`input` must still be `{}`** (empty object). **`null`**, omitting `input`, or `[]` is wrong.
-- After the host runs tools, you receive a **`user`** message whose content includes **`tool_result`** blocks. Each `content` is a **string** (often JSON). Parse that string; that is the ground truth.
+__TOOL_PROTOCOL__
 
 ### Before you call - 5-second checklist
 - Is this tool name spelled **exactly** as in the tools list?
@@ -404,6 +233,9 @@ You do **not** run Python, shell, or HTTP from here. Ghidra and the Work UI chan
             tools_cached = tools_raw
 
         # Build system as list with cache_control; inject goal as prefix to keep the base cacheable.
+        # Tool-call mechanics differ per API, so the provider supplies that section.
+        # Plain replace, not str.format: the prompt is full of literal JSON braces.
+        system = system.replace("__TOOL_PROTOCOL__", self._provider.tool_protocol_prompt)
         system_text = system
         if goal:
             system_text = system + f"\n\nPinned goal: {goal}"
@@ -416,171 +248,72 @@ You do **not** run Python, shell, or HTTP from here. Ghidra and the Work UI chan
                 self._emit("agent_stopped", {"reason": "interrupt"})
                 return
 
-            base_kwargs: dict[str, Any] = {
-                "model": self._model,
-                "system": system_for_api,
-                "messages": self._memory.for_api(),
-                "tools": tools_cached,
-            }
-            # Opus 4.7+/4.8/5, Sonnet 5, and Fable/Mythos 5 reject temperature (HTTP 400).
-            if model_accepts_sampling_params(self._model):
-                base_kwargs["temperature"] = self._temperature
-            # Haiku rejects effort; xhigh only exists on some models (helper clamps/omits).
-            # Opus 5 also caps effort at "high" when thinking is off.
-            eff = effort_for_model(
-                self._model, self._effort, thinking_disabled=not self._extended_thinking
-            )
-            if eff is not None:
-                base_kwargs["output_config"] = {"effort": eff}
-            msg = None
-            streamed_turn = False
             try:
-                if self._extended_thinking:
-                    if model_uses_adaptive_thinking(self._model):
-                        base_kwargs["thinking"] = {"type": "adaptive"}
-                        base_kwargs["max_tokens"] = 16000
-                        # Extended thinking wants temperature=1.0, but only send it on
-                        # models that accept sampling params at all (else it 400s).
-                        if "temperature" in base_kwargs:
-                            base_kwargs["temperature"] = 1.0
-                    else:
-                        budget = int(self._thinking_budget_tokens)
-                        api_max = max_output_tokens_for_claude_model(self._model)
-                        max_out = min(max(8192, budget + 2048), api_max)
-                        budget = min(budget, max(1024, max_out - 2048))
-                        base_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-                        base_kwargs["max_tokens"] = max_out
-                        if "temperature" in base_kwargs:
-                            base_kwargs["temperature"] = 1.0
-                elif not model_thinks_by_default(self._model):
-                    base_kwargs["max_tokens"] = 8192
-                elif model_rejects_disabled_thinking(self._model):
-                    # Fable/Mythos 5 think unconditionally and 400 on an explicit
-                    # disable, so leave the parameter out and give max_tokens room
-                    # for thinking plus the reply.
-                    base_kwargs["max_tokens"] = min(
-                        16000, max_output_tokens_for_claude_model(self._model)
-                    )
-                else:
-                    # Opus 5 / Sonnet 5 think when "thinking" is omitted, so turning
-                    # it off has to be explicit.
-                    base_kwargs["thinking"] = {"type": "disabled"}
-                    base_kwargs["max_tokens"] = 8192
-                pair = self._invoke_messages_turn(base_kwargs)
-                if pair is None:
-                    return
-                msg, streamed_turn = pair
-            except TypeError:
-                logger.warning("messages API rejected thinking kwargs; retrying without thinking")
-                base_kwargs.pop("thinking", None)
-                base_kwargs["max_tokens"] = 8192
-                if "temperature" in base_kwargs:
-                    base_kwargs["temperature"] = self._temperature
-                try:
-                    pair = self._invoke_messages_turn(base_kwargs)
-                    if pair is None:
-                        return
-                    msg, streamed_turn = pair
-                except Exception as e:
-                    logger.exception("Anthropic request failed")
-                    self._emit("agent_error", {"message": str(e)})
-                    return
+                result = self._provider.run_turn(
+                    system=system_for_api,
+                    messages=self._memory.for_api(),
+                    tools=tools_cached,
+                    emit=self._emit,
+                    should_abort=lambda: self._interrupt.is_set(),
+                )
+            except ProviderInterrupted:
+                self._emit("agent_stopped", {"reason": "interrupt"})
+                return
             except Exception as e:
-                if self._extended_thinking and "thinking" in base_kwargs:
-                    logger.warning("Extended thinking failed (%s); retrying without it", e)
-                    base_retry = {k: v for k, v in base_kwargs.items() if k != "thinking"}
-                    base_retry["max_tokens"] = 8192
-                    if "temperature" in base_retry:
-                        base_retry["temperature"] = self._temperature
-                    try:
-                        pair = self._invoke_messages_turn(base_retry)
-                        if pair is None:
-                            return
-                        msg, streamed_turn = pair
-                    except Exception as e2:
-                        logger.exception("Anthropic request failed")
-                        self._emit("agent_error", {"message": str(e2)})
-                        return
-                else:
-                    logger.exception("Anthropic request failed")
-                    self._emit("agent_error", {"message": str(e)})
-                    return
+                logger.exception("%s request failed", self._provider.id)
+                self._emit("agent_error", {"message": str(e)})
+                return
 
-            if msg is None:
+            if result is None:
                 if self._interrupt.is_set():
                     self._emit("agent_stopped", {"reason": "interrupt"})
                 else:
                     self._emit(
                         "agent_error",
-                        {"message": "Incomplete response from Anthropic (stream ended without a message)."},
+                        {"message": "Incomplete response (stream ended without a message)."},
                     )
                 return
 
-            assert msg is not None
-            blocks_out: list[dict[str, Any]] = []
+            blocks_out = list(result.assistant_blocks)
             tool_result_blocks: list[dict[str, Any]] = []
-            # Thinking blocks collected separately; included in history only when turn has tool_use.
-            thinking_blocks_this_turn: list[dict[str, Any]] = []
 
-            for block in msg.content:
-                btype = getattr(block, "type", None)
-                if btype == "text":
-                    t = getattr(block, "text", "")
-                    if not streamed_turn:
-                        self._emit("assistant_text", {"text": t})
-                    bd = _block_to_api_dict(block)
-                    if bd:
-                        blocks_out.append(bd)
-                elif btype in ("thinking", "redacted_thinking"):
-                    if btype == "thinking":
-                        t = getattr(block, "thinking", "") or ""
-                        if not streamed_turn and t:
-                            self._emit("assistant_thinking", {"text": t})
-                    else:
-                        if not streamed_turn:
-                            self._emit("assistant_thinking", {"text": "[redacted thinking block]"})
-                    bd = _block_to_api_dict(block)
-                    if bd:
-                        thinking_blocks_this_turn.append(bd)
-                elif btype == "tool_use":
-                    tid = getattr(block, "id", "")
-                    name = getattr(block, "name", "")
-                    raw_inp = getattr(block, "input", None) or {}
-                    inp = dict(raw_inp) if isinstance(raw_inp, dict) else {}
-                    self._emit("tool_call", {"id": tid, "name": name, "input": inp})
-                    if self._interrupt.is_set():
-                        result = json.dumps({"error": "interrupted_before_tool"})
-                    else:
-                        try:
-                            result = run_tool(name, inp, self._ghidra, self._on_navigate, self._emit, self._batch_port)
-                        except Exception as e:
-                            logger.exception("Tool %s failed", name)
-                            result = json.dumps({"error": str(e)})
-                    cap = _tool_result_preview_cap(name)
-                    preview = result if len(result) < cap else result[:cap] + "..."
-                    self._emit("tool_result", {"id": tid, "name": name, "preview": preview})
-                    blocks_out.append({"type": "tool_use", "id": tid, "name": name, "input": inp})
-                    tool_result_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tid,
-                            "content": result,
-                        }
-                    )
+            for call in result.tool_calls:
+                self._emit("tool_call", {"id": call.id, "name": call.name, "input": call.input})
+                if self._interrupt.is_set():
+                    output = json.dumps({"error": "interrupted_before_tool"})
+                else:
+                    try:
+                        output = run_tool(
+                            call.name,
+                            call.input,
+                            self._ghidra,
+                            self._on_navigate,
+                            self._emit,
+                            self._batch_port,
+                        )
+                    except Exception as e:
+                        logger.exception("Tool %s failed", call.name)
+                        output = json.dumps({"error": str(e)})
+                cap = _tool_result_preview_cap(call.name)
+                preview = output if len(output) < cap else output[:cap] + "..."
+                self._emit("tool_result", {"id": call.id, "name": call.name, "preview": preview})
+                tool_result_blocks.append(
+                    {"type": "tool_result", "tool_use_id": call.id, "content": output}
+                )
 
-            # Thinking blocks must precede tool_use in history when continuing with tool results
-            # (API requires signed thinking blocks for multi-turn continuity).
-            if tool_result_blocks and thinking_blocks_this_turn:
-                blocks_out = thinking_blocks_this_turn + blocks_out
+            # Thinking blocks must precede tool_use in history when continuing with tool
+            # results (Anthropic requires signed thinking blocks for multi-turn continuity).
+            if tool_result_blocks and result.thinking_blocks:
+                blocks_out = result.thinking_blocks + blocks_out
 
             if blocks_out:
                 self._memory.add_assistant_blocks(blocks_out)
 
-            if msg.stop_reason == "tool_use" and tool_result_blocks:
+            if tool_result_blocks:
                 self._memory.add_tool_results(tool_result_blocks)
                 continue
 
-            self._emit("agent_done", {"stop_reason": msg.stop_reason})
+            self._emit("agent_done", {"stop_reason": result.stop_reason})
             return
 
         self._emit("agent_stopped", {"reason": "max_turns"})
