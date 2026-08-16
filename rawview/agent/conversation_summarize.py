@@ -6,14 +6,8 @@ import json
 import logging
 from typing import Any, Callable
 
-import anthropic
 
-from rawview.agent.anthropic_backoff import (
-    AnthropicBackoffInterrupted,
-    messages_create_with_backoff,
-    messages_stream_with_backoff,
-)
-from rawview.agent.claude_model_limits import model_accepts_sampling_params
+from rawview.agent.providers import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -107,61 +101,19 @@ def _text_from_message(msg: Any) -> str:
 
 def summarize_conversation_transcript(
     *,
-    api_key: str,
-    model: str,
+    provider: LLMProvider,
     transcript: str,
-    temperature: float = 0.2,
     emit: NoticeEmit = None,
     should_abort: ShouldAbort = None,
 ) -> str:
+    """Condense a chat transcript. Works on whatever backend is configured."""
     if not transcript.strip():
         raise ValueError("empty_transcript")
-    client = anthropic.Anthropic(api_key=api_key)
-    params: dict[str, Any] = {
-        "model": model,
-        "max_tokens": 8192,
-        "system": _SUMMARY_SYSTEM,
-        "messages": [{"role": "user", "content": transcript}],
-    }
-    # Opus 4.7+/4.8, Sonnet 5, and Fable/Mythos 5 reject temperature (HTTP 400).
-    if model_accepts_sampling_params(model):
-        params["temperature"] = float(temperature)
-
-    if hasattr(client.messages, "stream"):
-        try:
-            stream_began = False
-            with messages_stream_with_backoff(client, emit, params, should_abort=should_abort) as stream:
-                if emit is not None:
-                    emit("assistant_stream_begin", {"source": "summarize"})
-                stream_began = True
-                try:
-                    text_stream = getattr(stream, "text_stream", None)
-                    if text_stream is None:
-                        raise AttributeError("no text_stream")
-                    for text in text_stream:
-                        if should_abort is not None and should_abort():
-                            raise AnthropicBackoffInterrupted()
-                        if emit is not None:
-                            emit("assistant_text_delta", {"text": text, "source": "summarize"})
-                    msg = stream.get_final_message()
-                finally:
-                    if emit is not None and stream_began:
-                        emit("assistant_stream_end", {"source": "summarize"})
-            text = _text_from_message(msg)
-            if not text:
-                raise RuntimeError("summarizer_returned_no_text")
-            if emit is not None:
-                emit("assistant_stream_commit", {"text": text, "source": "summarize"})
-            return text
-        except AnthropicBackoffInterrupted:
-            raise
-        except Exception as e:
-            logger.warning("/summarize streaming failed (%s); falling back to non-streaming", e)
-
-    msg = messages_create_with_backoff(client, emit, params, should_abort=should_abort)
-    text = _text_from_message(msg)
-    if not text:
-        raise RuntimeError("summarizer_returned_no_text")
-    if emit is not None:
-        emit("assistant_stream_commit", {"text": text, "source": "summarize"})
-    return text
+    return provider.complete_text(
+        system=_SUMMARY_SYSTEM,
+        user_text=transcript,
+        max_tokens=8192,
+        emit=emit,
+        should_abort=should_abort,
+        source="summarize",
+    )

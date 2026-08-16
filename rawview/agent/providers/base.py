@@ -117,6 +117,22 @@ class LLMProvider(ABC):
         Raises :class:`ProviderError` for anything the user needs to read.
         """
 
+    def complete_text(
+        self,
+        *,
+        system: str,
+        user_text: str,
+        max_tokens: int = 8192,
+        emit: EmitFn | None = None,
+        should_abort: AbortFn | None = None,
+        source: str = "",
+    ) -> str:
+        """One-shot, tool-free text completion (used by /summarize).
+
+        Streams deltas through ``emit`` when it can. Raises on failure.
+        """
+        raise NotImplementedError
+
     @property
     def tool_protocol_prompt(self) -> str:
         """System-prompt section describing how *this* API wants tool calls emitted.

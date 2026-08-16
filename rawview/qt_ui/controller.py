@@ -23,6 +23,7 @@ from rawview.agent.conversation_summarize import (
     summarize_conversation_transcript,
 )
 from rawview.agent.memory import ConversationMemory
+from rawview.agent.providers import ProviderError, build_provider, preset_by_id
 from rawview.config import Settings, load_settings, user_data_dir
 from rawview.ghidra_bootstrap import is_valid_ghidra_root
 from rawview.ghidra.api import GhidraAPI
@@ -146,6 +147,25 @@ class RawViewQtController(QObject):
 
     def has_anthropic_key(self) -> bool:
         return bool(self.settings.anthropic_api_key.strip())
+
+    def agent_credentials_error(self) -> str:
+        """Empty string when the configured provider is usable, else the reason.
+
+        Local backends legitimately need no key at all, so this must not assume an
+        Anthropic key is required.
+        """
+        preset = preset_by_id(self.settings.llm_provider)
+        if preset.kind == "anthropic":
+            if not self.settings.anthropic_api_key.strip():
+                return "Set ANTHROPIC_API_KEY in File → Settings."
+            return ""
+        if preset.requires_key and not self.settings.llm_api_key.strip():
+            return f"{preset.label} needs an API key. Set it in File → Settings."
+        if not (self.settings.llm_base_url.strip() or preset.base_url):
+            return f"{preset.label} needs a base URL. Set it in File → Settings."
+        if not (self.settings.llm_model.strip() or preset.suggested_model):
+            return f"{preset.label} needs a model id. Set it in File → Settings."
+        return ""
 
     def analysis_progress_file(self) -> Path:
         """JSON snapshot written by Ghidra during auto-analysis (see AnalysisProgressMonitor.java)."""
@@ -549,21 +569,15 @@ class RawViewQtController(QObject):
             return
         low = text.lower()
         if low == "/summarize" or low.startswith("/summarize "):
-            if not self.has_anthropic_key():
-                self.agent_event.emit(
-                    "agent_error",
-                    {
-                        "message": "Set ANTHROPIC_API_KEY in File → Settings.",
-                    },
-                )
+            cred_err = self.agent_credentials_error()
+            if cred_err:
+                self.agent_event.emit("agent_error", {"message": cred_err})
                 return
             self._start_summarize_bootstrap()
             return
-        if not self.has_anthropic_key():
-            self.agent_event.emit(
-                "agent_error",
-                {"message": "Set ANTHROPIC_API_KEY in File → Settings."},
-            )
+        cred_err = self.agent_credentials_error()
+        if cred_err:
+            self.agent_event.emit("agent_error", {"message": cred_err})
             return
 
         is_new_chat = not self.agent_memory.is_nonempty()
@@ -594,18 +608,18 @@ class RawViewQtController(QObject):
                     open_next_json=self.agent_batch_open_next,
                 )
                 goal = self.pinned_goal_for_analysis_batch()
+                try:
+                    provider = build_provider(self.settings)
+                except ProviderError as e:
+                    emit("agent_error", {"message": str(e)})
+                    return
                 self._brain = AgentBrain(
-                    api_key=self.settings.anthropic_api_key,
-                    model=self.settings.anthropic_model,
+                    provider=provider,
                     ghidra_api=self._api,
                     memory=self.agent_memory,
                     max_turns=self.settings.agent_max_turns,
                     on_navigate=self.navigate_to_address,
                     emit=emit,
-                    extended_thinking=self.settings.agent_extended_thinking,
-                    thinking_budget_tokens=self.settings.agent_thinking_budget_tokens,
-                    temperature=self.settings.agent_temperature,
-                    effort=self.settings.agent_effort,
                     batch_port=batch_port,
                 )
                 if self._agent_stop_event.is_set():
@@ -679,8 +693,7 @@ class RawViewQtController(QObject):
                                 emit("agent_error", {"message": "Nothing to summarize yet - chat history is empty."})
                                 return
                             summary = summarize_conversation_transcript(
-                                api_key=self.settings.anthropic_api_key,
-                                model=self.settings.anthropic_model,
+                                provider=build_provider(self.settings),
                                 transcript=transcript,
                                 emit=emit,
                                 should_abort=lambda: self._agent_stop_event.is_set(),

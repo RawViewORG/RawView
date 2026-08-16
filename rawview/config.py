@@ -67,6 +67,24 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-opus-5", validation_alias="ANTHROPIC_MODEL")
 
+    # Which backend the agent talks to. "anthropic" keeps the fields above, so existing
+    # installs and rawview.env files are unaffected. Every other preset is served by the
+    # OpenAI-compatible adapter and uses the llm_* fields below.
+    llm_provider: str = Field(default="anthropic", validation_alias="LLM_PROVIDER")
+    llm_base_url: str = Field(
+        default="",
+        validation_alias="LLM_BASE_URL",
+        description="Override the preset's base URL (required for the 'custom' preset).",
+    )
+    llm_api_key: str = Field(default="", validation_alias="LLM_API_KEY")
+    llm_model: str = Field(default="", validation_alias="LLM_MODEL")
+    llm_max_tokens: int = Field(default=4096, validation_alias="LLM_MAX_TOKENS")
+    llm_supports_tools: bool = Field(
+        default=True,
+        validation_alias="LLM_SUPPORTS_TOOLS",
+        description="Turn off for local models whose chat template cannot emit tool calls.",
+    )
+
     ghidra_install_dir: Path | None = Field(default=None, validation_alias="GHIDRA_INSTALL_DIR")
     ghidra_bundle_url: str = Field(
         default="",

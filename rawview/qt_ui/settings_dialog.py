@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from rawview.agent.claude_model_limits import model_uses_adaptive_thinking
+from rawview.agent.providers import PRESETS, ProviderError, discover_models, preset_by_id
 from rawview.config import (
     Settings,
     parse_ghidra_jvm_max_heap,
@@ -95,6 +96,32 @@ class SettingsDialog(QDialog):
             "claude-haiku-4-5-20251001",
             "claude-fable-5",
         ]
+        self._provider = QComboBox()
+        for _p in PRESETS:
+            self._provider.addItem(_p.label, _p.id)
+        self._provider.setToolTip("Which backend the agent talks to.")
+        self._provider_hint = QLabel("")
+        self._provider_hint.setWordWrap(True)
+        self._llm_base_url = QLineEdit()
+        self._llm_base_url.setPlaceholderText("http://localhost:11434/v1")
+        self._llm_key = QLineEdit()
+        self._llm_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._llm_model = QComboBox()
+        self._llm_model.setEditable(True)
+        self._llm_model.setToolTip(
+            "Model id as the endpoint names it. Use Refresh to list what it offers."
+        )
+        self._llm_refresh = QPushButton("Refresh")
+        self._llm_refresh.setToolTip("Ask the endpoint which models it serves.")
+        self._llm_refresh.clicked.connect(self._refresh_llm_models)
+        self._llm_tools = QCheckBox("Model can call tools")
+        self._llm_tools.setToolTip(
+            "Turn off for local models whose chat template cannot emit tool calls. "
+            "RawView's agent needs tools to read the binary, so it will be chat-only."
+        )
+        self._llm_max_tokens = QSpinBox()
+        self._llm_max_tokens.setRange(256, 200000)
+        self._llm_max_tokens.setSingleStep(256)
         self._api_key = QLineEdit()
         self._api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self._model = QComboBox()
@@ -207,8 +234,20 @@ class SettingsDialog(QDialog):
         af = QFormLayout(self._agent_form_block)
         af.setSpacing(10)
         af.setHorizontalSpacing(14)
+        af.addRow("Provider", self._provider)
+        af.addRow("", self._provider_hint)
         af.addRow("Anthropic API key", self._api_key)
         af.addRow("Anthropic model", self._model)
+        af.addRow("Endpoint base URL", self._llm_base_url)
+        af.addRow("Endpoint API key", self._llm_key)
+        _model_row = QWidget()
+        _model_lay = QHBoxLayout(_model_row)
+        _model_lay.setContentsMargins(0, 0, 0, 0)
+        _model_lay.addWidget(self._llm_model, 1)
+        _model_lay.addWidget(self._llm_refresh)
+        af.addRow("Endpoint model", _model_row)
+        af.addRow("Max output tokens", self._llm_max_tokens)
+        af.addRow("", self._llm_tools)
         af.addRow("", self._think)
         af.addRow("Thinking budget (tokens)", self._think_budget)
         af.addRow("Agent max turns", self._max_turns)
@@ -349,6 +388,15 @@ class SettingsDialog(QDialog):
         if s.rawview_java_classpath:
             self._classpath.setPlainText(s.rawview_java_classpath)
         self._api_key.setText(s.anthropic_api_key)
+        _pidx = self._provider.findData(s.llm_provider or "anthropic")
+        self._provider.setCurrentIndex(_pidx if _pidx >= 0 else 0)
+        self._llm_base_url.setText(s.llm_base_url)
+        self._llm_key.setText(s.llm_api_key)
+        self._llm_model.setCurrentText(s.llm_model)
+        self._llm_max_tokens.setValue(int(s.llm_max_tokens))
+        self._llm_tools.setChecked(bool(s.llm_supports_tools))
+        self._provider.currentIndexChanged.connect(self._on_provider_changed)
+        self._on_provider_changed()
         self._model.setCurrentText(s.anthropic_model)
         self._max_turns.setValue(s.agent_max_turns)
         self._hist.setValue(s.agent_history_messages)
@@ -364,6 +412,75 @@ class SettingsDialog(QDialog):
         idx = self._theme.findData(tid)
         if idx >= 0:
             self._theme.setCurrentIndex(idx)
+
+    def _on_provider_changed(self, *_: object) -> None:
+        """Show only the fields the selected backend actually uses."""
+        preset = preset_by_id(str(self._provider.currentData() or "anthropic"))
+        is_anthropic = preset.kind == "anthropic"
+        self._api_key.setVisible(is_anthropic)
+        self._model.setVisible(is_anthropic)
+        for w in (
+            self._llm_base_url,
+            self._llm_key,
+            self._llm_model,
+            self._llm_refresh,
+            self._llm_tools,
+            self._llm_max_tokens,
+        ):
+            w.setVisible(not is_anthropic)
+        # Anthropic thinking/effort controls are meaningless on other backends.
+        self._think.setEnabled(is_anthropic)
+        self._effort_combo.setEnabled(is_anthropic)
+        if not is_anthropic:
+            self._think_budget.setEnabled(False)
+        else:
+            self._on_model_changed(self._model.currentText())
+        if not is_anthropic:
+            if preset.base_url and not self._llm_base_url.text().strip():
+                self._llm_base_url.setText(preset.base_url)
+            if preset.suggested_model and not self._llm_model.currentText().strip():
+                self._llm_model.setCurrentText(preset.suggested_model)
+            self._llm_key.setPlaceholderText(
+                "required" if preset.requires_key else "not needed for a local server"
+            )
+        self._provider_hint.setText(preset.hint)
+        # Labels sit in the form layout next to their widget; hide them in step.
+        layout = self._api_key.parentWidget().layout() if self._api_key.parentWidget() else None
+        if isinstance(layout, QFormLayout):
+            for w in (
+                self._api_key,
+                self._model,
+                self._llm_base_url,
+                self._llm_key,
+                self._llm_tools,
+                self._llm_max_tokens,
+            ):
+                lbl = layout.labelForField(w)
+                if lbl is not None:
+                    lbl.setVisible(w.isVisible())
+
+    def _refresh_llm_models(self) -> None:
+        """Populate the model list from the endpoint's own /models route."""
+        preset = preset_by_id(str(self._provider.currentData() or "anthropic"))
+        base_url = self._llm_base_url.text().strip() or preset.base_url
+        if not base_url:
+            QMessageBox.warning(self, "Refresh models", "Enter a base URL first.")
+            return
+        self._llm_refresh.setEnabled(False)
+        try:
+            models = discover_models(base_url, self._llm_key.text().strip())
+        except ProviderError as e:
+            QMessageBox.warning(self, "Refresh models", str(e))
+            return
+        finally:
+            self._llm_refresh.setEnabled(True)
+        if not models:
+            QMessageBox.information(self, "Refresh models", "The endpoint listed no models.")
+            return
+        current = self._llm_model.currentText().strip()
+        self._llm_model.clear()
+        self._llm_model.addItems(models)
+        self._llm_model.setCurrentText(current if current in models else models[0])
 
     def _on_model_changed(self, model: str) -> None:
         is_adaptive = model_uses_adaptive_thinking(model)
@@ -521,6 +638,12 @@ class SettingsDialog(QDialog):
         data["RAWVIEW_THEME"] = str(self._theme.currentData() or "tokyo_night")
 
         if self._ctrl.agent_enabled:
+            data["LLM_PROVIDER"] = str(self._provider.currentData() or "anthropic")
+            data["LLM_BASE_URL"] = self._llm_base_url.text().strip()
+            data["LLM_API_KEY"] = self._llm_key.text().strip()
+            data["LLM_MODEL"] = self._llm_model.currentText().strip()
+            data["LLM_MAX_TOKENS"] = str(self._llm_max_tokens.value())
+            data["LLM_SUPPORTS_TOOLS"] = "true" if self._llm_tools.isChecked() else "false"
             data["ANTHROPIC_API_KEY"] = self._api_key.text().strip()
             data["ANTHROPIC_MODEL"] = self._model.currentText().strip() or "claude-opus-5"
             data["AGENT_MAX_TURNS"] = str(self._max_turns.value())

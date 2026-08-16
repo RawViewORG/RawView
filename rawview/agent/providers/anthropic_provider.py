@@ -55,6 +55,14 @@ _TITLE_PROMPT = (
 )
 
 
+def _text_from_message(msg: object) -> str:
+    parts: list[str] = []
+    for block in getattr(msg, "content", None) or []:
+        if getattr(block, "type", None) == "text":
+            parts.append(getattr(block, "text", "") or "")
+    return "".join(parts).strip()
+
+
 def _block_to_api_dict(block: object) -> dict[str, Any] | None:
     """Map SDK content block objects to Anthropic API-style dicts for message history."""
     btype = getattr(block, "type", None)
@@ -260,6 +268,66 @@ class AnthropicProvider(LLMProvider):
     @property
     def tool_protocol_prompt(self) -> str:
         return _TOOL_PROTOCOL
+
+    def complete_text(
+        self,
+        *,
+        system: str,
+        user_text: str,
+        max_tokens: int = 8192,
+        emit: EmitFn | None = None,
+        should_abort: AbortFn | None = None,
+        source: str = "",
+    ) -> str:
+        params: dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user_text}],
+        }
+        if model_accepts_sampling_params(self._model):
+            params["temperature"] = self._temperature
+
+        if hasattr(self._client.messages, "stream"):
+            try:
+                stream_began = False
+                with messages_stream_with_backoff(
+                    self._client, emit, params, should_abort=should_abort
+                ) as stream:
+                    if emit is not None:
+                        emit("assistant_stream_begin", {"source": source})
+                    stream_began = True
+                    try:
+                        text_stream = getattr(stream, "text_stream", None)
+                        if text_stream is None:
+                            raise AttributeError("no text_stream")
+                        for piece in text_stream:
+                            if should_abort is not None and should_abort():
+                                raise AnthropicBackoffInterrupted()
+                            if emit is not None:
+                                emit("assistant_text_delta", {"text": piece, "source": source})
+                        msg = stream.get_final_message()
+                    finally:
+                        if emit is not None and stream_began:
+                            emit("assistant_stream_end", {"source": source})
+                text = _text_from_message(msg)
+                if not text:
+                    raise RuntimeError("summarizer_returned_no_text")
+                if emit is not None:
+                    emit("assistant_stream_commit", {"text": text, "source": source})
+                return text
+            except AnthropicBackoffInterrupted:
+                raise
+            except Exception as e:
+                logger.warning("streaming completion failed (%s); falling back", e)
+
+        msg = messages_create_with_backoff(self._client, emit, params, should_abort=should_abort)
+        text = _text_from_message(msg)
+        if not text:
+            raise RuntimeError("summarizer_returned_no_text")
+        if emit is not None:
+            emit("assistant_stream_commit", {"text": text, "source": source})
+        return text
 
     def generate_title(self, first_message: str) -> str:
         """Titles use Haiku regardless of the chat model: it is cheap and fast."""

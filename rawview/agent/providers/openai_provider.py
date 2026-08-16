@@ -343,6 +343,43 @@ class OpenAICompatibleProvider(LLMProvider):
     def tool_protocol_prompt(self) -> str:
         return _TOOL_PROTOCOL
 
+    def complete_text(
+        self,
+        *,
+        system: str,
+        user_text: str,
+        max_tokens: int = 8192,
+        emit: EmitFn | None = None,
+        should_abort: AbortFn | None = None,
+        source: str = "",
+    ) -> str:
+        payload = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "temperature": self._temperature,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_text},
+            ],
+        }
+        for attempt in range(len(_STRIPPABLE) + 1):
+            try:
+                resp = self._post(payload, stream=False)
+                self._raise_for_status(resp.status_code, resp.text, self._label)
+                choice = (resp.json().get("choices") or [{}])[0]
+                text = (choice.get("message") or {}).get("content") or ""
+                if not text.strip():
+                    raise ProviderError("summarizer_returned_no_text")
+                if emit is not None:
+                    emit("assistant_stream_commit", {"text": text, "source": source})
+                return text
+            except ProviderError as e:
+                healed = self._adapt_payload(payload, str(e))
+                if healed is None or attempt == len(_STRIPPABLE):
+                    raise
+                payload = healed
+        raise ProviderError("summarizer_failed")
+
     def generate_title(self, first_message: str) -> str:
         try:
             resp = self._client.post(
