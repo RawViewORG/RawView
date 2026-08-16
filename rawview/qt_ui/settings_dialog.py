@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rawview.agent.claude_model_limits import model_uses_adaptive_thinking
 from rawview.config import (
     Settings,
     parse_ghidra_jvm_max_heap,
@@ -84,6 +85,7 @@ class SettingsDialog(QDialog):
         self._classpath.setPlaceholderText("Optional full Java classpath (overrides auto-discovery)")
         self._classpath.setMaximumHeight(80)
         _KNOWN_MODELS = [
+            "claude-opus-5",
             "claude-opus-4-8",
             "claude-opus-4-7",
             "claude-opus-4-6",
@@ -364,11 +366,10 @@ class SettingsDialog(QDialog):
             self._theme.setCurrentIndex(idx)
 
     def _on_model_changed(self, model: str) -> None:
-        m = model.lower()
-        is_adaptive = ("claude-sonnet-4" in m or "claude-sonnet-5" in m or "claude-opus-4" in m or "claude-fable" in m or "claude-mythos" in m) and "haiku" not in m
+        is_adaptive = model_uses_adaptive_thinking(model)
         self._think_budget.setEnabled(not is_adaptive)
         self._think_budget.setToolTip(
-            "Not used for this model — it uses adaptive thinking (self-selects budget)."
+            "Not used for this model; it uses adaptive thinking (self-selects budget)."
             if is_adaptive else
             "Max tokens the model may use for thinking (for models that don't support adaptive thinking)."
         )
@@ -521,7 +522,7 @@ class SettingsDialog(QDialog):
 
         if self._ctrl.agent_enabled:
             data["ANTHROPIC_API_KEY"] = self._api_key.text().strip()
-            data["ANTHROPIC_MODEL"] = self._model.currentText().strip() or "claude-opus-4-6"
+            data["ANTHROPIC_MODEL"] = self._model.currentText().strip() or "claude-opus-5"
             data["AGENT_MAX_TURNS"] = str(self._max_turns.value())
             data["AGENT_HISTORY_MESSAGES"] = str(self._hist.value())
             data["AGENT_TEMPERATURE"] = str(round(float(self._agent_temp.value()), 4))

@@ -17,6 +17,8 @@ from rawview.agent.claude_model_limits import (
     effort_for_model,
     max_output_tokens_for_claude_model,
     model_accepts_sampling_params,
+    model_rejects_disabled_thinking,
+    model_thinks_by_default,
     model_uses_adaptive_thinking,
 )
 from rawview.agent.memory import ConversationMemory
@@ -418,11 +420,14 @@ You do **not** run Python, shell, or HTTP from here. Ghidra and the Work UI chan
                 "messages": self._memory.for_api(),
                 "tools": tools_cached,
             }
-            # Opus 4.7+/4.8, Sonnet 5, and Fable/Mythos 5 reject temperature (HTTP 400).
+            # Opus 4.7+/4.8/5, Sonnet 5, and Fable/Mythos 5 reject temperature (HTTP 400).
             if model_accepts_sampling_params(self._model):
                 base_kwargs["temperature"] = self._temperature
             # Haiku rejects effort; xhigh only exists on some models (helper clamps/omits).
-            eff = effort_for_model(self._model, self._effort)
+            # Opus 5 also caps effort at "high" when thinking is off.
+            eff = effort_for_model(
+                self._model, self._effort, thinking_disabled=not self._extended_thinking
+            )
             if eff is not None:
                 base_kwargs["output_config"] = {"effort": eff}
             msg = None
@@ -445,7 +450,19 @@ You do **not** run Python, shell, or HTTP from here. Ghidra and the Work UI chan
                         base_kwargs["max_tokens"] = max_out
                         if "temperature" in base_kwargs:
                             base_kwargs["temperature"] = 1.0
+                elif not model_thinks_by_default(self._model):
+                    base_kwargs["max_tokens"] = 8192
+                elif model_rejects_disabled_thinking(self._model):
+                    # Fable/Mythos 5 think unconditionally and 400 on an explicit
+                    # disable, so leave the parameter out and give max_tokens room
+                    # for thinking plus the reply.
+                    base_kwargs["max_tokens"] = min(
+                        16000, max_output_tokens_for_claude_model(self._model)
+                    )
                 else:
+                    # Opus 5 / Sonnet 5 think when "thinking" is omitted, so turning
+                    # it off has to be explicit.
+                    base_kwargs["thinking"] = {"type": "disabled"}
                     base_kwargs["max_tokens"] = 8192
                 pair = self._invoke_messages_turn(base_kwargs)
                 if pair is None:

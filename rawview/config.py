@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     )
 
     anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY")
-    anthropic_model: str = Field(default="claude-opus-4-6", validation_alias="ANTHROPIC_MODEL")
+    anthropic_model: str = Field(default="claude-opus-5", validation_alias="ANTHROPIC_MODEL")
 
     ghidra_install_dir: Path | None = Field(default=None, validation_alias="GHIDRA_INSTALL_DIR")
     ghidra_bundle_url: str = Field(

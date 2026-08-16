@@ -14,6 +14,7 @@ _CLAUDE_MODEL_PREFIX_MAX_OUTPUT: tuple[tuple[str, int], ...] = (
     # Claude 5 / 4.8 / 4.7 / 4.6 (latest)
     ("claude-fable-5", 128_000),
     ("claude-mythos-5", 128_000),
+    ("claude-opus-5", 128_000),
     ("claude-sonnet-5", 128_000),
     ("claude-opus-4-8", 128_000),
     ("claude-opus-4-7", 128_000),
@@ -70,6 +71,7 @@ def max_output_tokens_for_claude_model(model: str) -> int:
 _NO_SAMPLING_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-7",
     "claude-opus-4-8",
+    "claude-opus-5",
     "claude-sonnet-5",
     "claude-fable",
     "claude-mythos",
@@ -79,6 +81,27 @@ _NO_SAMPLING_PREFIXES: tuple[str, ...] = (
 _XHIGH_EFFORT_PREFIXES: tuple[str, ...] = (
     "claude-opus-4-7",
     "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-fable",
+    "claude-mythos",
+)
+
+# Models that reject an explicit thinking={"type": "disabled"} outright (thinking is
+# always on) - the parameter must be omitted entirely instead.
+_NO_DISABLED_THINKING_PREFIXES: tuple[str, ...] = (
+    "claude-fable",
+    "claude-mythos",
+)
+
+# Models that accept thinking={"type": "disabled"} only at effort "high" or lower;
+# pairing it with "xhigh"/"max" is an HTTP 400.
+_DISABLED_THINKING_EFFORT_CAPPED_PREFIXES: tuple[str, ...] = ("claude-opus-5",)
+
+# Models where thinking runs even when the "thinking" parameter is omitted. On these,
+# leaving it out is not the same as turning thinking off.
+_THINKING_ON_BY_DEFAULT_PREFIXES: tuple[str, ...] = (
+    "claude-opus-5",
     "claude-sonnet-5",
     "claude-fable",
     "claude-mythos",
@@ -93,7 +116,7 @@ def model_accepts_sampling_params(model: str) -> bool:
 
 def model_uses_adaptive_thinking(model: str) -> bool:
     """True for models that use adaptive thinking (and reject ``budget_tokens``): Sonnet 4.6+/5,
-    Opus 4.6+/4.7/4.8, Fable/Mythos 5. Haiku and older models still use ``budget_tokens``."""
+    Opus 4.6+/4.7/4.8/5, Fable/Mythos 5. Haiku and older models still use ``budget_tokens``."""
     m = _normalize_claude_model_id(model)
     if "haiku" in m:
         return False
@@ -101,9 +124,35 @@ def model_uses_adaptive_thinking(model: str) -> bool:
         m.startswith("claude-sonnet-4")
         or m.startswith("claude-sonnet-5")
         or m.startswith("claude-opus-4")
+        or m.startswith("claude-opus-5")
         or m.startswith("claude-fable")
         or m.startswith("claude-mythos")
     )
+
+
+def model_rejects_disabled_thinking(model: str) -> bool:
+    """True when ``thinking={"type": "disabled"}`` is an HTTP 400 at any effort (Fable/Mythos 5).
+
+    On these models thinking is always on; the parameter has to be omitted entirely.
+    """
+    m = _normalize_claude_model_id(model)
+    return any(m.startswith(p) for p in _NO_DISABLED_THINKING_PREFIXES)
+
+
+def model_caps_effort_when_thinking_disabled(model: str) -> bool:
+    """True when disabling thinking is only valid at effort ``high`` or lower (Opus 5)."""
+    m = _normalize_claude_model_id(model)
+    return any(m.startswith(p) for p in _DISABLED_THINKING_EFFORT_CAPPED_PREFIXES)
+
+
+def model_thinks_by_default(model: str) -> bool:
+    """True when omitting ``thinking`` still runs thinking (Opus 5, Sonnet 5, Fable/Mythos 5).
+
+    On these models the parameter must be sent explicitly to turn thinking off, and
+    ``max_tokens`` caps thinking plus response text together.
+    """
+    m = _normalize_claude_model_id(model)
+    return any(m.startswith(p) for p in _THINKING_ON_BY_DEFAULT_PREFIXES)
 
 
 def model_supports_xhigh_effort(model: str) -> bool:
@@ -111,15 +160,23 @@ def model_supports_xhigh_effort(model: str) -> bool:
     return any(m.startswith(p) for p in _XHIGH_EFFORT_PREFIXES)
 
 
-def effort_for_model(model: str, effort: str) -> str | None:
+def effort_for_model(model: str, effort: str, *, thinking_disabled: bool = False) -> str | None:
     """Return the effort value to place in ``output_config``, or ``None`` to omit it.
 
     Haiku 4.5 rejects ``output_config.effort`` -> ``None``. ``xhigh`` is only valid on
-    Opus 4.7/4.8, Sonnet 5, and Fable/Mythos 5 -> downgraded to ``high`` elsewhere.
+    Opus 4.7/4.8/5, Sonnet 5, and Fable/Mythos 5 -> downgraded to ``high`` elsewhere.
+    With ``thinking_disabled``, models that cap disabled thinking at ``high`` (Opus 5)
+    also get ``xhigh``/``max`` clamped down, since that pairing is an HTTP 400.
     """
     m = _normalize_claude_model_id(model)
     if "haiku" in m:
         return None
     if effort == "xhigh" and not model_supports_xhigh_effort(model):
+        return "high"
+    if (
+        thinking_disabled
+        and effort in ("xhigh", "max")
+        and model_caps_effort_when_thinking_disabled(model)
+    ):
         return "high"
     return effort
