@@ -8,6 +8,7 @@ from typing import Any
 
 from rawview.agent.memory import ConversationMemory
 from rawview.agent.providers import LLMProvider, ProviderInterrupted
+from rawview.agent.tool_call_salvage import looks_like_tool_handoff
 from rawview.agent.tools import AgentBatchToolPort, anthropic_tool_list, run_tool
 from rawview.ghidra.api import GhidraAPI
 
@@ -42,6 +43,39 @@ _ANALYZE_ALIASES = frozenset(
         "auto analysis",
     }
 )
+
+
+# A turn that produces neither a tool call nor a usable answer is a stall. The usual
+# cause on smaller/local models is losing the plot on who runs the tools: they end the
+# turn asking the user to run something and paste the output, which nobody will ever
+# do. One firm correction usually snaps them back; more than a couple would just burn
+# the user's tokens in a loop, so the count is capped per user prompt.
+_MAX_STALL_NUDGES = 2
+
+_HANDOFF_NUDGE = (
+    "[RawView host] Your last turn ended without a tool call and asked the user to run "
+    "something and report back. That is not how this session works, and nothing you are "
+    "waiting for will arrive: **you** are the RawView agent. The host executes every tool "
+    "call you emit against the live Ghidra session and puts the result straight back into "
+    "this conversation for you to read - the user runs nothing by hand and has no output "
+    "to paste. Emit the tool call you need now, using the tool-call protocol described in "
+    "your instructions (JSON typed into chat text is not a call and is never executed). If "
+    "you were actually finished, drop the request and answer the user directly instead."
+)
+
+_EMPTY_NUDGE = (
+    "[RawView host] Your last turn produced no text and no tool call, so the user saw "
+    "nothing. Either emit the tool call you need - the host runs it and returns the result "
+    "to you automatically - or answer the user's question in plain prose."
+)
+
+
+def _assistant_text_of(blocks: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        str(b.get("text", ""))
+        for b in blocks
+        if isinstance(b, dict) and b.get("type") == "text"
+    )
 
 
 def _expand_short_analyze_intent(text: str) -> str:
@@ -127,6 +161,11 @@ You are RawView, the in-app reverse-engineering agent. You act on a live Ghidra 
 - **Refuse** requests for instructions that enable serious real-world harm unrelated to legitimate RE - for example: weapons or explosives, terrorism, targeted harassment, non-consensual surveillance, or detailed guidance for committing crimes. Decline briefly and offer safe alternatives (e.g. general security concepts, or analysis confined to the binary at hand) when appropriate.
 - Do not provide step-by-step instructions for self-harm; encourage seeking professional help instead.
 - Normal RE tasks (unpacking, unpacking malware samples in Ghidra, exploit mitigation understanding, crypto in binaries) remain in scope when tied to analysis here.
+
+## Who you are in this loop
+- You are the agent, not an assistant coaching an operator. Every tool call you emit is executed by the RawView host the moment your turn ends, and its result is appended to this same conversation for you to read - automatically, with no human in between.
+- The person you are talking to is a RawView user watching a chat feed. They cannot run your tool calls, cannot see them, and have no output to paste. **Never** end a turn asking them to run something and report back, and never say you are waiting for a tool result: emit the call and the result comes to you.
+- The only reasons to end a turn without a tool call are answering the user or asking them a genuine question (which binary they mean, a path only they know).
 
 ## How you work
 - Default to tools over speculation. If you lack facts (addresses, names, xrefs), fetch them; do not invent addresses or behavior.
@@ -243,6 +282,8 @@ __TOOL_PROTOCOL__
             {"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}
         ]
 
+        stall_nudges = 0
+
         for _ in range(self._max_turns):
             if self._interrupt.is_set():
                 self._emit("agent_stopped", {"reason": "interrupt"})
@@ -312,6 +353,31 @@ __TOOL_PROTOCOL__
             if tool_result_blocks:
                 self._memory.add_tool_results(tool_result_blocks)
                 continue
+
+            # No tool call. Before ending the turn, check the model did not simply
+            # forget that it is the one driving - see _HANDOFF_NUDGE.
+            reply = _assistant_text_of(blocks_out)
+            if stall_nudges < _MAX_STALL_NUDGES and result.stop_reason != "max_tokens":
+                if not reply.strip():
+                    stall_nudges += 1
+                    logger.info("Empty turn from %s; nudging", self._provider.model)
+                    self._memory.add_host_note(_EMPTY_NUDGE)
+                    continue
+                if looks_like_tool_handoff(reply):
+                    stall_nudges += 1
+                    logger.info("Tool handoff from %s; nudging", self._provider.model)
+                    self._emit(
+                        "agent_notice",
+                        {
+                            "message": (
+                                "The model asked you to run a tool and paste the result back. "
+                                "RawView reminded it that it drives the tools itself and let it "
+                                "try again - smaller local models lose track of this."
+                            )
+                        },
+                    )
+                    self._memory.add_host_note(_HANDOFF_NUDGE)
+                    continue
 
             self._emit("agent_done", {"stop_reason": result.stop_reason})
             return

@@ -39,6 +39,28 @@ Known limitation: reasoning blocks are not portable between vendors, so switchin
 provider mid-conversation drops earlier reasoning from the replayed history. Text and
 tool calls carry over intact.
 
+### Keeping smaller models in the agent loop
+
+Local models lose the plot in two specific ways, and both used to end the run:
+
+- **The tool call never reaches the API field.** Whether a model's call arrives as
+  `tool_calls` depends on the server's chat template and tool-call parser, so the same
+  GGUF that calls tools under Ollama emits `<tool_call>{...}</tool_call>` as chat text
+  under a bare llama.cpp server. RawView now recovers calls written as plain text -
+  Hermes/Qwen tags, Mistral `[TOOL_CALLS]`, Llama `<function=…>` and pythonic
+  `[fn(arg=…)]`, fenced or bare JSON - runs them, and strips the raw JSON from the
+  feed. Only names from the real tool list are recovered, and you get a one-time note
+  telling you the endpoint is missing a parser for that model.
+- **The model forgets it is the agent** and ends its turn with "run this and paste the
+  tool output so I can keep working". Nobody was ever going to paste anything: the
+  host runs every call and feeds the result straight back. The loop now spots that
+  hand-off (and a turn that returns nothing at all), tells the model who is driving,
+  and lets it try again - at most twice per message, so a confused model cannot spend
+  your tokens in a loop.
+
+The system prompt states the same thing up front for every backend: the host executes
+tool calls automatically, and the user has nothing to paste.
+
 ### Internals
 
 Vendor specifics now live behind a provider interface; `AgentBrain` owns the tool loop
