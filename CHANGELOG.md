@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased
+
+### Ghidra engine
+
+The Java bridge is where RawView actually talks to Ghidra, and several of its answers
+were placeholders. This pass makes them real, verified against Ghidra 12.0.4 on live
+binaries.
+
+**Tools that did nothing now work.** `rename_variable`, `create_struct` and
+`set_function_signature` returned `not_implemented` while still being advertised to the
+agent. They are implemented against the same APIs Ghidra's own UI uses - decompiler
+variables through `HighFunctionDBUtil`, C types through Ghidra's C parser, prototypes
+through `ApplyFunctionSignatureCmd` - so applying a signature or naming a local
+immediately changes the decompiled output. A prototype written over a default
+`FUN_00401000` name also renames the function; a name you chose is kept.
+
+**Edits are transactional.** Every database write now opens its own named Ghidra
+transaction and commits only on success. Previously RawView wrote with no transaction
+of its own and worked only because the importer happened to leave one open - which is
+absent after restoring a saved session, and gave the whole session a single undo step.
+Each rename, comment and retype is now separately undoable.
+
+**Answers that were wrong:**
+
+- **Exports** listed the first 2000 primary symbols of any kind, so the pane filled with
+  string labels and section headers. It now reports the image's actual exports.
+- **Entry points** looked for a symbol exactly at the image base and returned nothing for
+  an ordinary ELF or PE. It now finds `entry` / `_start` / `main` / `DllMain`, falling
+  back to entry-point functions and then the image base.
+- **The hex view** failed outright whenever its window ran past the end of a memory
+  block - near every section boundary - because the whole range was read at once. It now
+  returns the bytes that are actually mapped.
+- **Byte search** returned only the first match and rejected wildcards. It returns every
+  match, each with its containing function and memory block, and accepts `??` wildcards
+  and unseparated hex, so signatures work as written.
+- **Addresses** written as `0x00401000`, as a symbol name, or block-qualified
+  (`.rodata:00104f60`, the form `get_strings` itself returns) were rejected as invalid.
+  All three are accepted now.
+- **Project directory**: the JVM never created its own project folder, so any entry point
+  other than the Qt window failed on first open with a bare `FileNotFoundException`.
+
+**Faster on real targets.** Decompiled C is cached until the program changes (1011 ms to
+43 ms on a large function, and any edit invalidates it). Function, string and symbol
+listings are filtered and windowed inside the JVM instead of marshalling the entire
+program through Py4J so the caller can throw most of it away - the symbols pane was
+transferring every symbol to show 500.
+
+**Auto-analysis can be cancelled.** `cancel_analysis()` stops a run in flight (the
+monitor was constructed non-cancellable); the run keeps the analysis it completed and
+does not mark the program analyzed, so it can be resumed. The cancel is delivered
+out-of-band around the Py4J mutex, which the analysis call holds for its whole run.
+
+Also: comments can be written to any slot (`EOL`, `PRE`, `POST`, `PLATE`, `REPEATABLE`),
+`rename_function` falls back to renaming the label when the address holds data,
+`decompile_function` takes a per-call timeout, the decompiler is configured from the
+program's own options, and `python -m rawview.scripts.smoke_bridge_test` now checks all
+of the above against a real binary.
+
+Rebuild the bridge to pick this up: `python -m rawview.scripts.compile_java`. Older
+compiled bridges keep working - the Python layer falls back to the previous calls.
+
 ## 1.3.0
 
 ### Use any model: local or cloud

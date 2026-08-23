@@ -22,7 +22,8 @@ public class AnalysisProgressMonitor extends TaskMonitorAdapter {
     private String lastWrittenJson = "";
 
     public AnalysisProgressMonitor(File progressFile, Supplier<String> activeCommandSummary) {
-        super(false);
+        // Cancellable: GhidraBridge.cancelAnalysis() stops a long auto-analysis run from the UI/agent.
+        super(true);
         this.progressFile = progressFile;
         this.activeCommandSummary = activeCommandSummary;
     }
@@ -63,6 +64,12 @@ public class AnalysisProgressMonitor extends TaskMonitorAdapter {
         flush();
     }
 
+    @Override
+    public void cancel() {
+        super.cancel();
+        flush();
+    }
+
     private synchronized void flush() {
         try {
             String detail = getMessage();
@@ -89,6 +96,9 @@ public class AnalysisProgressMonitor extends TaskMonitorAdapter {
                     int pct = (int) Math.min(100L, Math.max(0L, (prog * 100L) / max));
                     sb.append(",\"indeterminate\":false,\"percent\":").append(pct);
                 }
+            }
+            if (isCancelled()) {
+                sb.append(",\"cancelled\":true");
             }
             sb.append('}');
             String json = sb.toString();

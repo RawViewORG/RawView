@@ -234,6 +234,22 @@ class GhidraBridgeController:
                 raise RuntimeError("Bridge not started")
             return fn(self._gateway.entry_point)
 
+    def invoke_java_out_of_band(self, fn: Callable[[Any], Any]) -> Any:
+        """
+        Run ``fn(entry_point)`` *without* taking the RPC mutex.
+
+        Only for calls that must reach the JVM while another RPC is in flight — cancelling an
+        auto-analysis run that will otherwise hold the mutex for minutes — and only for JVM methods that
+        are cheap, non-blocking and safe to enter concurrently (``cancelAnalysis``, ``isAnalysisRunning``:
+        neither is ``synchronized`` on the Java side, and both only touch a volatile flag). Py4J opens a
+        separate socket per calling thread, so this does not disturb the in-flight call. Anything that
+        reads or mutates program state must go through :meth:`invoke_java` instead.
+        """
+        gw = self._gateway
+        if gw is None:
+            raise RuntimeError("Bridge not started")
+        return fn(gw.entry_point)
+
     def _terminate_subprocess(self) -> None:
         if self._proc is None:
             return
