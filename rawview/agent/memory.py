@@ -31,6 +31,25 @@ class ConversationMemory:
         self._trim()
         self._messages.append({"role": "assistant", "content": blocks})
 
+    def add_host_note(self, text: str) -> None:
+        """Append an out-of-band note from the host, as user-role text the model reads.
+
+        Never starts a second user message in a row: Anthropic expects alternating
+        roles, and a note that follows tool results belongs *in* that same user turn,
+        after the ``tool_result`` blocks.
+        """
+        if self._messages:
+            last = self._messages[-1]
+            if last.get("role") == "user":
+                content = last.get("content")
+                if isinstance(content, str):
+                    last["content"] = content.rstrip() + "\n\n" + text.lstrip()
+                    return
+                if isinstance(content, list):
+                    content.append({"type": "text", "text": text})
+                    return
+        self.add_user(text)
+
     def add_tool_results(self, blocks: list[dict[str, Any]]) -> None:
         self._trim()
         self._messages.append({"role": "user", "content": blocks})

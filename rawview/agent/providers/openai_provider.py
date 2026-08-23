@@ -37,6 +37,7 @@ from rawview.agent.providers.base import (
     ToolCall,
     TurnResult,
 )
+from rawview.agent.tool_call_salvage import extract_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,12 @@ _TOOL_PROTOCOL = """### Put yourself in the right mode
 - `function.arguments` keys must be **exactly** the property names from that tool's `parameters` schema (`address`, not `addr` or `Address`). Include every **required** key; optional keys may be omitted.
 - For tools with no parameters, `function.arguments` must still be **`"{}"`** - an empty JSON object, never `null` or an empty string.
 - Emit one entry per call; to run several tools, put several entries in the same `tool_calls` array.
-- After the host runs them you receive one **`tool`** role message per call, matched by `tool_call_id`. Its content is a **string** (often JSON). Parse it; that is the ground truth."""
+- After the host runs them you receive one **`tool`** role message per call, matched by `tool_call_id`. Its content is a **string** (often JSON). Parse it; that is the ground truth.
+
+### You are the one holding the tools
+- The host runs every call **automatically** and appends the result to this same conversation, then asks you to continue. Nobody copies anything by hand.
+- The human on the other end is a RawView user, **not** a relay: they cannot run your calls, cannot see your `tool_calls`, and have nothing to paste. Asking them to "run this and paste the output", or ending your turn with "waiting for the tool result", stalls the session - the result was already on its way to you.
+- So: if you need data, **emit the call and stop talking**; the next thing you read will be its result. Only end your turn without a tool call when you are actually answering the user or asking them a genuine question (an ambiguous target, a missing file path)."""
 
 # finish_reason -> canonical stop reason.
 _FINISH_MAP = {
@@ -101,6 +107,14 @@ def _content_to_text(content: Any) -> str:
     return str(content)
 
 
+def _assistant_text(result: TurnResult) -> str:
+    """The text the user should see for a turn, after any salvage rewrote it."""
+    for block in result.assistant_blocks:
+        if block.get("type") == "text":
+            return str(block.get("text", ""))
+    return ""
+
+
 class OpenAICompatibleProvider(LLMProvider):
     id = "openai"
 
@@ -127,6 +141,10 @@ class OpenAICompatibleProvider(LLMProvider):
         self._stream = stream
         self._label = provider_label
         self._client = httpx.Client(timeout=httpx.Timeout(timeout, connect=15.0))
+        # Tool names of the current turn, so plain-text calls can be validated
+        # against the real registry rather than guessed at.
+        self._tool_names: tuple[str, ...] = ()
+        self._salvage_announced = False
 
     @property
     def model(self) -> str:
@@ -418,6 +436,7 @@ class OpenAICompatibleProvider(LLMProvider):
         emit: EmitFn,
         should_abort: AbortFn,
     ) -> TurnResult | None:
+        self._tool_names = tuple(str(t.get("name")) for t in tools or [] if t.get("name"))
         payload = self._payload(system, messages, tools)
         for attempt in range(len(_STRIPPABLE) + 1):
             try:
@@ -445,14 +464,18 @@ class OpenAICompatibleProvider(LLMProvider):
         reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
         if reasoning:
             emit("assistant_thinking", {"text": reasoning})
-        if text:
-            emit("assistant_text", {"text": text})
-        return self._assemble(
+        result = self._assemble(
             text=text,
             raw_tool_calls=message.get("tool_calls") or [],
             finish_reason=choice.get("finish_reason"),
             streamed=False,
+            emit=emit,
         )
+        # Show what survived salvage, so a recovered call is not also printed as JSON.
+        display = _assistant_text(result)
+        if display:
+            emit("assistant_text", {"text": display})
+        return result
 
     def _run_streaming(
         self, payload: dict[str, Any], emit: EmitFn, should_abort: AbortFn
@@ -519,9 +542,6 @@ class OpenAICompatibleProvider(LLMProvider):
         if should_abort():
             return None
         merged = "".join(text_parts)
-        if merged.strip():
-            emit("assistant_stream_commit", {"text": merged})
-
         raw_tool_calls = [
             {
                 "id": slot["id"],
@@ -530,12 +550,19 @@ class OpenAICompatibleProvider(LLMProvider):
             for _, slot in sorted(acc.items())
             if slot.get("name")
         ]
-        return self._assemble(
+        result = self._assemble(
             text=merged,
             raw_tool_calls=raw_tool_calls,
             finish_reason=finish_reason,
             streamed=True,
+            emit=emit,
         )
+        # The commit replaces the streamed text in the feed, so committing the
+        # post-salvage text is also what removes a recovered call's raw JSON from it.
+        display = _assistant_text(result)
+        if display or (merged.strip() and result.tool_calls):
+            emit("assistant_stream_commit", {"text": display})
+        return result
 
     # ------------------------------------------------------------ assembly
 
@@ -546,11 +573,64 @@ class OpenAICompatibleProvider(LLMProvider):
         raw_tool_calls: Iterable[dict[str, Any]],
         finish_reason: str | None,
         streamed: bool,
+        emit: EmitFn | None = None,
     ) -> TurnResult:
         result = TurnResult(streamed=streamed)
+        structured = self._calls_from_wire(raw_tool_calls)
+
+        if not structured and text:
+            # No structured call, but the model may still have written one as prose.
+            # Whether a tool call reaches `tool_calls` at all depends on the server's
+            # chat template and tool-call parser, and local runners frequently ship
+            # without one - the same GGUF that calls tools under Ollama emits
+            # `<tool_call>{...}</tool_call>` as text under a bare llama.cpp server.
+            salvaged, cleaned = extract_tool_calls(text, self._tool_names)
+            if salvaged:
+                logger.info(
+                    "Recovered %d tool call(s) from plain text (%s / %s)",
+                    len(salvaged),
+                    self._label,
+                    self._model,
+                )
+                if emit is not None and not self._salvage_announced:
+                    self._salvage_announced = True
+                    emit(
+                        "agent_notice",
+                        {
+                            "message": (
+                                f"{self._model} wrote its tool call as plain text instead of "
+                                "using the API's tool_calls field - this endpoint likely has no "
+                                "tool-call parser for this model. RawView is translating those "
+                                "calls for you; expect the occasional miss."
+                            )
+                        },
+                    )
+                text = cleaned
+                structured = [
+                    ToolCall(
+                        id=f"call_{uuid.uuid4().hex[:12]}", name=call.name, input=call.input
+                    )
+                    for call in salvaged
+                ]
+
         if text:
             result.assistant_blocks.append({"type": "text", "text": text})
+        for call in structured:
+            result.tool_calls.append(call)
+            result.assistant_blocks.append(
+                {"type": "tool_use", "id": call.id, "name": call.name, "input": call.input}
+            )
 
+        # Some servers report "stop" even while returning tool calls; trust the calls.
+        if result.tool_calls:
+            result.stop_reason = "tool_use"
+        else:
+            result.stop_reason = _FINISH_MAP.get(finish_reason or "stop", "end_turn")
+        return result
+
+    @staticmethod
+    def _calls_from_wire(raw_tool_calls: Iterable[dict[str, Any]]) -> list[ToolCall]:
+        out: list[ToolCall] = []
         for raw in raw_tool_calls:
             fn = raw.get("function") or {}
             name = fn.get("name") or ""
@@ -573,14 +653,5 @@ class OpenAICompatibleProvider(LLMProvider):
                 parsed = {"__raw_arguments__": args}
             # Some local servers omit ids entirely; the loop needs one to correlate.
             call_id = raw.get("id") or f"call_{uuid.uuid4().hex[:12]}"
-            result.tool_calls.append(ToolCall(id=call_id, name=name, input=parsed))
-            result.assistant_blocks.append(
-                {"type": "tool_use", "id": call_id, "name": name, "input": parsed}
-            )
-
-        # Some servers report "stop" even while returning tool calls; trust the calls.
-        if result.tool_calls:
-            result.stop_reason = "tool_use"
-        else:
-            result.stop_reason = _FINISH_MAP.get(finish_reason or "stop", "end_turn")
-        return result
+            out.append(ToolCall(id=call_id, name=name, input=parsed))
+        return out
