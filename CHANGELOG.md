@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.3.2
+
+### Fixes a broken 1.3.1
+
+**RawView 1.3.1 does not start.** Every package it shipped - `.deb`, `.rpm`,
+`.AppImage`, `.msi` - crashes at import before the window opens:
+
+```
+rawview/qt_ui/app.py -> main_window.py -> controller.py -> brain.py
+  -> agent/providers/__init__.py:14
+ModuleNotFoundError: No module named 'httpx'
+```
+
+`rawview.agent.providers` imports `httpx` directly, but `httpx` was never declared in
+`pyproject.toml` - it only ever arrived as a dependency of `anthropic`. The `anthropic`
+1.0 release switched from `httpx` to `httpx2`, and since the pin was an open
+`anthropic>=0.40.0`, the build resolved 1.0 and `httpx` silently disappeared from the
+bundle. `httpx` is now a declared dependency, because the code imports it.
+
+Auditing the SDK bump turned up a second break in the same release. The `anthropic` 1.0
+`messages.create` and `messages.stream` no longer accept `temperature` and take no
+`**kwargs`, so every request for a model that still accepts sampling params - Haiku 4.5,
+Opus 4.1, Sonnet 4.5 - would raise `TypeError`. `anthropic` is capped below 1.0 until
+that migration is done deliberately.
+
+Users on 1.3.0 were never affected; that bundle was built while `anthropic` still
+depended on `httpx`.
+
+### Release pipeline
+
+The release workflow built and published a bundle that could not start, because nothing
+in it ever imported the application. Both the Linux and Windows jobs now walk the app's
+real startup import chain before packaging, and fail the release if it breaks.
+
 ## 1.3.1
 
 ### Ghidra engine
