@@ -125,51 +125,54 @@ def _build_registry(
         else:
             run_aa = bool(run_aa)
         name = api.open_file(path)
+        analysis: dict[str, Any] = {}
         if run_aa:
-            api.run_auto_analysis()
+            analysis = api.run_auto_analysis()
         if emit_fn is not None:
             emit_fn("ghidra_shell_refresh", {"program": name})
-        return json.dumps({"program": name, "path": path, "run_auto_analysis": run_aa})
+        out: dict[str, Any] = {"program": name, "path": path, "run_auto_analysis": run_aa}
+        if run_aa:
+            out["functions"] = analysis.get("functions")
+            out["analysis_cancelled"] = bool(analysis.get("cancelled"))
+        return json.dumps(out)
 
     def run_auto(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
-        api.run_auto_analysis()
+        res = api.run_auto_analysis()
         if emit_fn is not None:
             emit_fn("ghidra_shell_refresh", {})
-        return json.dumps({"status": "analysis_complete"})
-
-    def list_functions(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
-        rows = api.list_functions()
-        total_defined = len(rows)
-        needle = str(inp.get("name_contains", "") or "").strip().lower()
-        if needle:
-            rows = [r for r in rows if needle in str(r.get("name", "")).lower()]
-        matched_after_name_filter = len(rows)
-        off = int(inp.get("offset", 0) or 0)
-        off = max(0, off)
-        if off:
-            rows = rows[off:]
-        lim_raw = inp.get("limit", None)
-        truncated_by_limit = False
-        if lim_raw is not None:
-            lim = int(lim_raw)
-            lim = max(1, min(lim, 50_000))
-            if len(rows) > lim:
-                truncated_by_limit = True
-                rows = rows[:lim]
+        cancelled = bool(res.get("cancelled"))
         return json.dumps(
             {
-                "functions": rows,
-                "count": len(rows),
-                "total_defined": total_defined,
-                "matched_after_name_filter": matched_after_name_filter,
-                "offset": off,
-                "truncated": truncated_by_limit,
+                "status": "analysis_cancelled" if cancelled else "analysis_complete",
+                "seconds": res.get("seconds"),
+                "functions": res.get("functions"),
             }
         )
 
+    def list_functions(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        needle = str(inp.get("name_contains", "") or "").strip()
+        off = max(0, int(inp.get("offset", 0) or 0))
+        lim_raw = inp.get("limit", None)
+        lim = max(1, min(int(lim_raw), 50_000)) if lim_raw is not None else 50_000
+        # Filtering and windowing happen in the JVM, so a 100k-function image is not marshalled whole.
+        page = api.list_functions_page(offset=off, limit=lim, name_filter=needle)
+        out: dict[str, Any] = {
+            "functions": page.get("rows", []),
+            "count": page.get("count", 0),
+            "matched_after_name_filter": page.get("total", 0),
+            "offset": page.get("offset", off),
+            "truncated": bool(page.get("truncated", False)),
+        }
+        if not needle:
+            # Unfiltered, the match count is the whole function count; keep the old key for that case.
+            out["total_defined"] = page.get("total", 0)
+        return json.dumps(out)
+
     def decompile_function(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
         addr = str(inp["address"])
-        text = api.decompile_function(addr)
+        timeout_raw = inp.get("timeout_seconds", None)
+        timeout_s = int(timeout_raw) if timeout_raw is not None else None
+        text = api.decompile_function(addr, timeout_s=timeout_s)
         return json.dumps({"address": addr, "pseudocode": text})
 
     def get_disassembly(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
@@ -184,22 +187,19 @@ def _build_registry(
         return json.dumps({"navigated": addr})
 
     def get_strings(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
-        rows = api.get_strings()
-        total = len(rows)
-        off = int(inp.get("offset", 0) or 0)
-        off = max(0, off)
-        if off:
-            rows = rows[off:]
+        off = max(0, int(inp.get("offset", 0) or 0))
         lim_raw = inp.get("limit", None)
-        truncated_by_limit = False
-        if lim_raw is not None:
-            lim = int(lim_raw)
-            lim = max(1, min(lim, 50_000))
-            if len(rows) > lim:
-                truncated_by_limit = True
-                rows = rows[:lim]
+        lim = max(1, min(int(lim_raw), 50_000)) if lim_raw is not None else 50_000
+        min_len = max(0, int(inp.get("min_length", 0) or 0))
+        page = api.get_strings_page(offset=off, limit=lim, min_length=min_len)
         return json.dumps(
-            {"strings": rows, "count": len(rows), "total_defined": total, "offset": off, "truncated": truncated_by_limit}
+            {
+                "strings": page.get("rows", []),
+                "count": page.get("count", 0),
+                "total_defined": page.get("total", 0),
+                "offset": page.get("offset", off),
+                "truncated": bool(page.get("truncated", False)),
+            }
         )
 
     def get_imports(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
@@ -246,27 +246,39 @@ def _build_registry(
         return json.dumps(res)
 
     def rename_variable(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
-        return json.dumps(
-            api.rename_variable(str(inp["function_address"]), str(inp["old_name"]), str(inp["new_name"]))
+        res = api.rename_variable(
+            str(inp["function_address"]), str(inp["old_name"]), str(inp["new_name"])
         )
+        if emit_fn is not None and res.get("ok"):
+            emit_fn("ghidra_shell_refresh", {})
+        return json.dumps(res)
 
     def set_comment(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
-        res = api.set_comment(str(inp["address"]), str(inp["text"]))
+        res = api.set_comment(
+            str(inp["address"]), str(inp["text"]), str(inp.get("comment_type", "EOL") or "EOL")
+        )
         if emit_fn is not None:
             emit_fn("ghidra_shell_refresh", {})
         return json.dumps(res)
 
     def search_bytes(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
-        return json.dumps(api.search_bytes(str(inp["pattern"])))
+        max_matches = int(inp.get("max_matches", 64) or 64)
+        return json.dumps(api.search_bytes(str(inp["pattern"]), max_matches=max_matches))
 
     def get_data_at(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
         return json.dumps(api.get_data_at(str(inp["address"])))
 
     def create_struct(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
-        return json.dumps(api.create_struct(str(inp["address"]), str(inp["struct_definition"])))
+        res = api.create_struct(str(inp.get("address", "") or ""), str(inp["struct_definition"]))
+        if emit_fn is not None and res.get("ok"):
+            emit_fn("ghidra_shell_refresh", {})
+        return json.dumps(res)
 
     def set_function_signature(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
-        return json.dumps(api.set_function_signature(str(inp["address"]), str(inp["signature"])))
+        res = api.set_function_signature(str(inp["address"]), str(inp["signature"]))
+        if emit_fn is not None and res.get("ok"):
+            emit_fn("ghidra_shell_refresh", {})
+        return json.dumps(res)
 
     def get_control_flow_graph(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
         return json.dumps(api.get_control_flow_graph(str(inp["address"])))
@@ -460,6 +472,10 @@ def _build_registry(
                         "type": "string",
                         "description": "Function entry symbol or hex address (e.g. FUN_00401000 or 00401000).",
                     },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Decompiler budget for this function, 1-600. Defaults to 120.",
+                    },
                 },
                 "required": ["address"],
             },
@@ -512,6 +528,10 @@ def _build_registry(
                 "properties": {
                     "limit": {"type": "integer", "description": "Max rows after offset (1–50000). Omit for full list."},
                     "offset": {"type": "integer", "description": "Skip this many strings (default 0)."},
+                    "min_length": {
+                        "type": "integer",
+                        "description": "Drop strings shorter than this many characters. Defaults to 0.",
+                    },
                 },
             },
             handler=get_strings,
@@ -606,8 +626,9 @@ def _build_registry(
         RegisteredTool(
             name="rename_variable",
             description=(
-                "Rename a stack/local variable inside a decompiled function. `old_name` must match the "
-                "current decompiler name. May be unsupported for some functions - check tool JSON result."
+                "Rename a local or parameter inside a function. `old_name` must match the name as it "
+                "appears in the decompiler output (e.g. `iVar1`, `param_1`, `local_18`). If the name is "
+                "not found the result lists the variables the function does have."
             ),
             parameters_schema={
                 "type": "object",
@@ -623,14 +644,20 @@ def _build_registry(
         RegisteredTool(
             name="set_comment",
             description=(
-                "Attach an end-of-line (EOL) comment at `address` in the database. Good for marking invariants, "
-                "protocol fields, or TODOs visible in both listing and decompiler."
+                "Attach a comment at `address` in the database. Good for marking invariants, protocol "
+                "fields, or TODOs visible in both listing and decompiler. Defaults to an end-of-line "
+                "comment; use PLATE for a block comment above a function."
             ),
             parameters_schema={
                 "type": "object",
                 "properties": {
                     "address": {"type": "string", "description": "Instruction or data address."},
                     "text": {"type": "string", "description": "Short comment text (avoid secrets)."},
+                    "comment_type": {
+                        "type": "string",
+                        "enum": ["EOL", "PRE", "POST", "PLATE", "REPEATABLE"],
+                        "description": "Comment slot to write. Defaults to EOL.",
+                    },
                 },
                 "required": ["address", "text"],
             },
@@ -639,15 +666,20 @@ def _build_registry(
         RegisteredTool(
             name="search_bytes",
             description=(
-                "Binary search from the image minimum address for a literal byte pattern. Pattern is "
-                'space-separated hex pairs, e.g. "48 89 E5" for x86-64 prologue. Returns hit addresses.'
+                "Search all program memory for a byte pattern and return every match, each with the "
+                'containing function and memory block. Hex bytes with or without separators ("48 89 E5" '
+                'or "4889e5"), and "??" matches any byte, so signatures with wildcards work directly.'
             ),
             parameters_schema={
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": 'Exact space-separated hex bytes (no wildcards), e.g. "48 89 E5".',
+                        "description": 'Hex bytes, "??" for a wildcard byte, e.g. "48 8B ?? ?? E8".',
+                    },
+                    "max_matches": {
+                        "type": "integer",
+                        "description": "Match cap, 1-1000. Defaults to 64.",
                     },
                 },
                 "required": ["pattern"],
@@ -670,27 +702,32 @@ def _build_registry(
         RegisteredTool(
             name="create_struct",
             description=(
-                "Lay down or apply a struct layout at `address` using `struct_definition` text (format depends "
-                "on Ghidra bridge). May return not_implemented in MVP builds - use get_data_at if it fails."
+                "Define a C data type in the program and optionally lay it down at `address`. Takes real C "
+                "text - a struct, typedef or enum - and resolves field types against the program's own type "
+                "manager. Leave `address` empty to define the type without applying it anywhere."
             ),
             parameters_schema={
                 "type": "object",
                 "properties": {
-                    "address": {"type": "string", "description": "Where to apply the struct."},
+                    "address": {
+                        "type": "string",
+                        "description": "Where to apply the type; empty string to only define it.",
+                    },
                     "struct_definition": {
                         "type": "string",
-                        "description": "Struct definition string per Ghidra API expectations.",
+                        "description": 'C text, e.g. "struct Hdr { int magic; char name[8]; void *next; };".',
                     },
                 },
-                "required": ["address", "struct_definition"],
+                "required": ["struct_definition"],
             },
             handler=create_struct,
         ),
         RegisteredTool(
             name="set_function_signature",
             description=(
-                "Set the function prototype (return type, name, args) to improve decompilation. May be "
-                "not_implemented in MVP - check JSON response."
+                "Set the function prototype - return type, name, parameter names and types, calling "
+                "convention - which usually improves the decompiled output of this function and its "
+                "callers immediately. Returns the prototype Ghidra actually applied."
             ),
             parameters_schema={
                 "type": "object",

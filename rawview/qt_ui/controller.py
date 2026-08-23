@@ -36,6 +36,9 @@ from rawview.ghidra.bridge import (
 
 logger = logging.getLogger(__name__)
 
+#: Rows the symbols pane shows; the JVM windows the symbol table to this before transfer.
+SYMBOL_PANE_ROWS = 500
+
 
 def _bridge_restart_fingerprint(s: Settings) -> tuple[object, ...]:
     """Settings that require restarting the Ghidra JVM when changed."""
@@ -508,7 +511,7 @@ class RawViewQtController(QObject):
                 self.strings_updated.emit(self._api.get_strings())
                 self.imports_updated.emit(self._api.get_imports())
                 self.exports_updated.emit(self._api.get_exports())
-                self.symbols_updated.emit(self._api.get_symbols()[:500])
+                self.symbols_updated.emit(self._api.get_symbols_page(limit=SYMBOL_PANE_ROWS)["rows"])
             except Exception as e:
                 logger.exception("refresh tables")
                 self.ghidra_task_failed.emit(str(e))
@@ -547,7 +550,7 @@ class RawViewQtController(QObject):
                 self.strings_updated.emit(self._api.get_strings())
                 self.imports_updated.emit(self._api.get_imports())
                 self.exports_updated.emit(self._api.get_exports())
-                self.symbols_updated.emit(self._api.get_symbols()[:500])
+                self.symbols_updated.emit(self._api.get_symbols_page(limit=SYMBOL_PANE_ROWS)["rows"])
                 addr = self._current_address.strip()
                 if addr:
                     self._refresh_views_for_address(addr)
