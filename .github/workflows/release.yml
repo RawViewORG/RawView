@@ -98,6 +98,28 @@ jobs:
       - name: Compile Java bridge
         run: python -m rawview.scripts.compile_java
 
+      - name: Import smoke (the app must start before we package it)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libdbus-1-3
+          python - <<'PY'
+          import importlib
+          # Same chain the app walks at startup: main -> qt_ui.app -> main_window -> controller
+          # -> agent.brain -> agent.providers. v1.3.1 shipped four packages that died here on an
+          # undeclared httpx, because the release path never imported the app before packaging it.
+          for name in [
+              "rawview.config",
+              "rawview.agent.providers",
+              "rawview.agent.brain",
+              "rawview.agent.conversation_summarize",
+              "rawview.qt_ui.settings_dialog",
+              "rawview.qt_ui.main_window",
+          ]:
+              importlib.import_module(name)
+              print("ok", name)
+          PY
+
       - name: Build PyInstaller bundle
         run: bash build-linux.sh
 
@@ -157,6 +179,13 @@ jobs:
 
       - name: Compile Java bridge
         run: python -m rawview.scripts.compile_java
+        shell: cmd
+
+      - name: Import smoke (the app must start before we package it)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -c "import importlib; [ (importlib.import_module(n), print('ok', n)) for n in ['rawview.config','rawview.agent.providers','rawview.agent.brain','rawview.agent.conversation_summarize','rawview.qt_ui.settings_dialog','rawview.qt_ui.main_window'] ]"
         shell: cmd
 
       - name: Install WiX Toolset 3.14
