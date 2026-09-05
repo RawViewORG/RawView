@@ -121,6 +121,97 @@ def _windows_java_cmdline_limit() -> int:
     return 24_000
 
 
+def _classpath_items(java_args: list[str]) -> list[str]:
+    """Extract the classpath entries from a ``-cp`` java argument list."""
+    try:
+        i = java_args.index("-cp")
+    except ValueError:
+        return []
+    cp = java_args[i + 1]
+    sep = ";" if sys.platform == "win32" else ":"
+    return [c for c in cp.split(sep) if c]
+
+
+def _build_bwrap_mounts_and_rewrite(
+    *,
+    java_exe: Path,
+    ghidra_install: Path,
+    classes_root: Path,
+    py4j_jar: Path,
+    project_dir: Path,
+    java_args: list[str],
+) -> tuple[list[str], list[str]]:
+    """
+    Build bwrap arguments that sandbox the Ghidra JVM using a read-only root + overlay layout.
+
+    Layout:
+      --ro-bind / /   read-only whole root (so the JVM's arbitrary absolute toolchain paths resolve)
+      --tmpfs over user/sensitive trees to strip real data:
+          /home, /root, /media, /mnt, /srv, /var
+      --ro-bind back the exact toolchain dirs that must exist under /home (Ghidra install,
+          JDK, bridge classes, py4j jar) at their real absolute guest paths.
+      --bind  <project_dir> <same>   the ONLY writable host tree (analyzed programs / RE sessions).
+      --tmpfs /tmp + HOME=/tmp        sandbox-local temp space.
+
+    The project dir keeps its real host absolute path so Ghidra-returned paths round-trip to RawView.
+    Py4J is loopback-only, so the network namespace is shared (:func:`_classpath` uses loopback).
+    With /home + /root stripped to tmpfs and only the toolchain re-bound, a compromise of the Ghidra
+    process cannot read the user's wallets, .ssh, browsers, or other data.
+    """
+    jdk_root = java_exe.resolve().parent.parent
+
+    bwrap_args = [
+        "bwrap",
+        "--unshare-pid",
+        "--unshare-uts",
+        "--unshare-ipc",
+        "--unshare-user",
+        "--die-with-parent",
+        "--share-net",
+        "--ro-bind",
+        "/",
+        "/",
+        "--tmpfs",
+        "/home",
+        "--tmpfs",
+        "/root",
+        "--tmpfs",
+        "/media",
+        "--tmpfs",
+        "/mnt",
+        "--tmpfs",
+        "/srv",
+        "--tmpfs",
+        "/var",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--ro-bind",
+        "/sys",
+        "/sys",
+        "--tmpfs",
+        "/tmp",
+    ]
+
+    toolchain_roots: list[Path] = [
+        ghidra_install.resolve(),
+        jdk_root,
+        classes_root.resolve(),
+        py4j_jar.resolve().parent,
+    ]
+    for root in sorted(toolchain_roots, key=lambda p: -len(p.parts)):
+        bwrap_args += ["--ro-bind", str(root), str(root)]
+    proj = project_dir.resolve()
+    bwrap_args += ["--bind", str(proj), str(proj)]
+    bwrap_args += ["--setenv", "HOME", "/tmp"]
+    bwrap_args += ["--chdir", str(proj)]
+
+    # The toolchain stays at its real host paths, so java_args need no path rewriting.
+    bwrap_args.append(str(java_exe.resolve()))
+    return bwrap_args, java_args
+
+
 def _pick_free_loopback_tcp_port(preferred: int, *, span: int = 256) -> int:
     """
     Return a port on 127.0.0.1 that is free at probe time, scanning upward from ``preferred``.
@@ -176,6 +267,7 @@ class GhidraBridgeController:
     project_dir: Path
     java_classes_dir: Path | None
     raw_classpath: str | None
+    sandbox: str = "none"
     startup_timeout_s: float = 120.0
     # Wait for in-flight RPC before tearing down Py4J (auto-analysis can run a long time).
     # Still bounded so Quit does not hang forever on a stuck JVM.
@@ -301,7 +393,32 @@ class GhidraBridgeController:
                 _write_java_argfile(argf, java_args)
                 logger.info("Using Java @argfile (command line length ~%s): %s", approx, argf)
                 return [exe, f"@{argf.resolve()}"], argf
-        return [exe] + java_args, None
+        plain = [exe] + java_args
+        if self.sandbox == "bwrap" and not sys.platform.startswith("win"):
+            try:
+                classes_root = self.java_classes_dir
+                if classes_root is None:
+                    classes_root = _packaged_bridge_classes_dir()
+                if classes_root is None:
+                    raise FileNotFoundError("cannot resolve Java bridge classes dir for sandbox mount")
+                bwrap_args, rewritten = _build_bwrap_mounts_and_rewrite(
+                    java_exe=Path(exe),
+                    ghidra_install=self.ghidra_install_dir,
+                    classes_root=classes_root,
+                    py4j_jar=_find_py4j_jar(),
+                    project_dir=self.project_dir,
+                    java_args=java_args,
+                )
+                cmd = bwrap_args + rewritten
+                logger.info(
+                    "Running Ghidra JVM inside bubblewrap sandbox (%d ro-binds, project rw): %s",
+                    bwrap_args.count("--ro-bind"),
+                    " ".join(cmd) [:240],
+                )
+                return cmd, None
+            except Exception:
+                logger.exception("bwrap sandbox build failed; falling back to unsandboxed JVM")
+        return plain, None
 
     def _spawn_and_connect(self) -> None:
         """Start JVM + Py4J, retrying if the listen port is still occupied (stale process / race)."""

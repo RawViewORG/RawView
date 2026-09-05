@@ -9,17 +9,15 @@ from pathlib import Path
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root))
+    _default_ghidra_versions = ("ghidra_12.1.3_PUBLIC", "ghidra_12.0.4_PUBLIC", "ghidra_11.4.3_PUBLIC")
     if sys.platform == "win32":
-        _default_ghidra = str(
-            Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")))
-            / "RawView" / "ghidra_bundle" / "ghidra_extract" / "ghidra_12.0.4_PUBLIC"
-        )
+        base = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")))
     else:
-        _default_ghidra = str(
-            Path(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")))
-            / "RawView" / "ghidra_bundle" / "ghidra_extract" / "ghidra_12.0.4_PUBLIC"
-        )
-    os.environ.setdefault("GHIDRA_INSTALL_DIR", _default_ghidra)
+        base = Path(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")))
+    rpa = base / "RawView" / "ghidra_bundle" / "ghidra_extract"
+    cand = next((rpa / v for v in _default_ghidra_versions if (rpa / v).is_dir()), None)
+    if cand is not None:
+        os.environ.setdefault("GHIDRA_INSTALL_DIR", str(cand))
 
     from rawview.config import load_settings
     from rawview.ghidra.api import GhidraAPI
@@ -41,6 +39,7 @@ def main() -> int:
         project_dir=s.rawview_project_dir,
         java_classes_dir=jcd,
         raw_classpath=s.rawview_java_classpath,
+        sandbox=s.rawview_sandbox,
     )
     api = GhidraAPI(bridge=bridge)
     print("starting JVM…", flush=True)

@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.3.3
+
+### CRITICAL security: Ghidra >= 12.1 + optional sandboxed engine
+
+The bundled/default Ghidra was 12.0.4, which is vulnerable to multiple high-severity
+CVEs that a **crafted binary can trigger during import or decompilation** - exactly the
+input RawView is built to analyze:
+
+- **CVE-2026-52757** (CVSS 7.8) - heap use-after-free in the decompiler's
+  `HighVariable::merge()`, triggerable by a crafted binary.
+- **CVE-2026-52752** (CVSS 7.8) - SleighBuilder use-after-free, triggerable by
+  decompiling a malicious binary.
+- **CVE-2026-52750** (CVSS 7.8) - Swift demangler arbitrary code execution via a
+  malicious Ghidra project.
+- **CVE-2026-52753** (CVSS 5.5) - Mach-O export-trie out-of-memory / JVM crash.
+
+All are fixed in Ghidra 12.1. This release:
+
+- **Bumps the default/bundled Ghidra to 12.1.3** (`GHIDRA_BUNDLE_URL`), the latest
+  patched public release at release time. Existing installs should re-point
+  `GHIDRA_INSTALL_DIR` / `GHIDRA_BUNDLE_URL` at a 12.1+ build and recompile the Java
+  bridge (`python -m rawview.scripts.compile_java`).
+- **Adds `RAWVIEW_SANDBOX=bwrap` (Linux).** The Ghidra JVM now runs inside a
+  [bubblewrap](https://github.com/containers/bubblewrap) mount-namespace sandbox:
+  read-only root, `/home` `/root` `/media` `/mnt` `/srv` `/var` stripped to tmpfs, the
+  toolchain re-bound read-only, and the RawView project dir the only writable host tree.
+  A compromise of the Ghidra process (e.g. a future importer/decompiler bug) **cannot
+  read your `~/.ssh`, wallets, browsers, or other host files**. The Python/Qt app stays
+  user-mode on the host. Enabled by default on Linux when `bwrap` is installed; use
+  `RAWVIEW_SANDBOX=none` to disable.
+
+**Recommended:** all users analyzing untrusted/hostile binaries should upgrade to this
+release and re-point at Ghidra 12.1+ as soon as possible.
+
 ## 1.3.2
 
 ### Fixes a broken 1.3.1

@@ -30,10 +30,14 @@ def _ssl_context() -> ssl.SSLContext:
 
 
 # Official NSA Ghidra release zip (must match a real GitHub release asset name).
-# Resolved from https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/latest
+# Security: 12.0.4 and earlier are vulnerable to multiple Ghidra CVEs fixed in 12.1+
+# (decompiler heap-UAF CVE-2026-52757, SleighBuilder UAF CVE-2026-52752, Swift demangler
+# arbitrary code execution CVE-2026-52750, Mach-O export-trie OOM CVE-2026-52753).
+# RawView requires >= 12.1 for parsed-malware analysis. Auto-resolution via
+# resolve_latest_ghidra_public_zip_url() picks the newest GitHub PUBLIC release.
 DEFAULT_GHIDRA_ZIP_URL = (
     "https://github.com/NationalSecurityAgency/ghidra/releases/download/"
-    "Ghidra_12.0.4_build/ghidra_12.0.4_PUBLIC_20260303.zip"
+    "Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip"
 )
 
 

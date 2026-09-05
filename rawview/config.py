@@ -92,7 +92,17 @@ class Settings(BaseSettings):
         description="Override URL for the Ghidra public zip download.",
     )
 
+    rawview_sandbox: str = Field(default="bwrap", validation_alias="RAWVIEW_SANDBOX")
+
     rawview_auto_start_bridge: bool = Field(default=True, validation_alias="RAWVIEW_AUTO_START_BRIDGE")
+
+    @field_validator("rawview_sandbox", mode="before")
+    @classmethod
+    def _normalize_sandbox(cls, v: object) -> object:
+        if v is None:
+            return "bwrap"
+        val = str(v).strip().lower()
+        return val if val in ("none", "bwrap") else "bwrap"
 
     @field_validator("ghidra_install_dir", mode="before")
     @classmethod

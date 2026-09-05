@@ -199,6 +199,7 @@ class RawViewQtController(QObject):
             project_dir=self.settings.rawview_project_dir,
             java_classes_dir=self.settings.rawview_java_classes_dir,
             raw_classpath=self.settings.rawview_java_classpath,
+            sandbox=self.settings.rawview_sandbox,
         )
         self.status_message.emit("Starting Ghidra JVM...")
         self.bridge_state_changed.emit(BridgeState.STARTING.value)
