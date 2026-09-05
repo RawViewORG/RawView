@@ -37,7 +37,7 @@ from rawview.agent.providers.base import (
     ToolCall,
     TurnResult,
 )
-from rawview.agent.tool_call_salvage import extract_tool_calls
+from rawview.agent.tool_call_salvage import extract_tool_calls, repair_call
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,21 @@ _FINISH_MAP = {
 #   - Reasoning models and several local runners reject temperature outright.
 _STRIPPABLE = ("max_tokens", "temperature", "tools")
 
+# Ollama's OpenAI shim renders some chat templates (Qwen3 among them) by looking for
+# the last user query, and rejects the whole request with HTTP 500 "no user query
+# found in messages" when the transcript ends on tool results - which is exactly what
+# every turn after the first tool call looks like. A trailing user message satisfies
+# the template and costs nothing on endpoints that never needed it.
+_NO_USER_QUERY_MARKERS = ("no user query", "no user message")
+
+_TOOL_CONTINUATION = (
+    "[RawView host] The tool results above are the newest data in this session. "
+    "Continue: emit the next tool call, or answer the user."
+)
+
+# Heals are applied at most once each, so a genuinely broken request still fails fast.
+_MAX_HEAL_ATTEMPTS = len(_STRIPPABLE) + 2
+
 
 def _flatten_system(system: Any) -> str:
     """RawView passes system as Anthropic text blocks (with cache_control); flatten it."""
@@ -105,6 +120,19 @@ def _content_to_text(content: Any) -> str:
                 parts.append(block)
         return "\n".join(parts)
     return str(content)
+
+
+def _append_tool_continuation(payload: dict[str, Any]) -> bool:
+    """Add a trailing user turn when the transcript ends on tool results.
+
+    Returns False when the payload already ends on a user message, which both keeps
+    the heal idempotent and leaves ordinary turns untouched.
+    """
+    messages = payload.get("messages") or []
+    if not messages or messages[-1].get("role") == "user":
+        return False
+    payload["messages"] = list(messages) + [{"role": "user", "content": _TOOL_CONTINUATION}]
+    return True
 
 
 def _assistant_text(result: TurnResult) -> str:
@@ -145,6 +173,9 @@ class OpenAICompatibleProvider(LLMProvider):
         # against the real registry rather than guessed at.
         self._tool_names: tuple[str, ...] = ()
         self._salvage_announced = False
+        self._name_repair_announced = False
+        # Set once a server complains that a tool-result turn has no user query.
+        self._needs_user_after_tool = False
 
     @property
     def model(self) -> str:
@@ -297,6 +328,8 @@ class OpenAICompatibleProvider(LLMProvider):
         }
         if self._supports_tools and tools:
             payload["tools"] = self._translate_tools(tools)
+        if self._needs_user_after_tool:
+            _append_tool_continuation(payload)
         return payload
 
     def _headers(self) -> dict[str, str]:
@@ -312,6 +345,16 @@ class OpenAICompatibleProvider(LLMProvider):
         of every local runner, react to what the server actually complained about.
         """
         low = detail.lower()
+        if any(marker in low for marker in _NO_USER_QUERY_MARKERS):
+            payload = dict(payload)
+            if _append_tool_continuation(payload):
+                self._needs_user_after_tool = True
+                logger.warning(
+                    "%s rejected a tool-result turn without a trailing user message; "
+                    "appending one for the rest of this session",
+                    self._label,
+                )
+                return payload
         if "max_completion_tokens" in low and "max_tokens" in payload:
             # GPT-5 / o-series rename.
             payload = dict(payload)
@@ -380,7 +423,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 {"role": "user", "content": user_text},
             ],
         }
-        for attempt in range(len(_STRIPPABLE) + 1):
+        for attempt in range(_MAX_HEAL_ATTEMPTS):
             try:
                 resp = self._post(payload, stream=False)
                 self._raise_for_status(resp.status_code, resp.text, self._label)
@@ -393,7 +436,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 return text
             except ProviderError as e:
                 healed = self._adapt_payload(payload, str(e))
-                if healed is None or attempt == len(_STRIPPABLE):
+                if healed is None or attempt == _MAX_HEAL_ATTEMPTS - 1:
                     raise
                 payload = healed
         raise ProviderError("summarizer_failed")
@@ -438,14 +481,14 @@ class OpenAICompatibleProvider(LLMProvider):
     ) -> TurnResult | None:
         self._tool_names = tuple(str(t.get("name")) for t in tools or [] if t.get("name"))
         payload = self._payload(system, messages, tools)
-        for attempt in range(len(_STRIPPABLE) + 1):
+        for attempt in range(_MAX_HEAL_ATTEMPTS):
             try:
                 if self._stream:
                     return self._run_streaming(payload, emit, should_abort)
                 return self._run_blocking(payload, emit, should_abort)
             except ProviderError as e:
                 healed = self._adapt_payload(payload, str(e))
-                if healed is None or attempt == len(_STRIPPABLE):
+                if healed is None or attempt == _MAX_HEAL_ATTEMPTS - 1:
                     raise
                 payload = healed
         return None
@@ -576,7 +619,7 @@ class OpenAICompatibleProvider(LLMProvider):
         emit: EmitFn | None = None,
     ) -> TurnResult:
         result = TurnResult(streamed=streamed)
-        structured = self._calls_from_wire(raw_tool_calls)
+        structured = self._calls_from_wire(raw_tool_calls, emit)
 
         if not structured and text:
             # No structured call, but the model may still have written one as prose.
@@ -628,8 +671,9 @@ class OpenAICompatibleProvider(LLMProvider):
             result.stop_reason = _FINISH_MAP.get(finish_reason or "stop", "end_turn")
         return result
 
-    @staticmethod
-    def _calls_from_wire(raw_tool_calls: Iterable[dict[str, Any]]) -> list[ToolCall]:
+    def _calls_from_wire(
+        self, raw_tool_calls: Iterable[dict[str, Any]], emit: EmitFn | None = None
+    ) -> list[ToolCall]:
         out: list[ToolCall] = []
         for raw in raw_tool_calls:
             fn = raw.get("function") or {}
@@ -651,6 +695,35 @@ class OpenAICompatibleProvider(LLMProvider):
                     parsed = {"__raw_arguments__": args}
             if not isinstance(parsed, dict):
                 parsed = {"__raw_arguments__": args}
+            # A structured call can still name something that is not a tool. The
+            # common case is the protocol's own vocabulary: the model reads "emit a
+            # tool_use block", puts `tool_use` in function.name, and nests the real
+            # call in the arguments. Running that verbatim burns a turn on
+            # `unknown_tool`, so unwrap it when the arguments name a real tool.
+            if self._tool_names and name not in self._tool_names:
+                repaired = repair_call(name, parsed, self._tool_names)
+                if repaired is not None:
+                    logger.info(
+                        "Rewrote wire tool call %r -> %r (%s / %s)",
+                        name,
+                        repaired.name,
+                        self._label,
+                        self._model,
+                    )
+                    if emit is not None and not self._name_repair_announced:
+                        self._name_repair_announced = True
+                        emit(
+                            "agent_notice",
+                            {
+                                "message": (
+                                    f"{self._model} called a tool named \"{name}\" instead of "
+                                    f"\"{repaired.name}\" - it wrapped the call in the "
+                                    "protocol's own vocabulary. RawView unwrapped it and ran "
+                                    "the real tool."
+                                )
+                            },
+                        )
+                    name, parsed = repaired.name, repaired.input
             # Some local servers omit ids entirely; the loop needs one to correlate.
             call_id = raw.get("id") or f"call_{uuid.uuid4().hex[:12]}"
             out.append(ToolCall(id=call_id, name=name, input=parsed))

@@ -32,7 +32,7 @@ from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["SalvagedCall", "extract_tool_calls", "looks_like_tool_handoff"]
+__all__ = ["SalvagedCall", "extract_tool_calls", "looks_like_tool_handoff", "repair_call"]
 
 # Keys different templates use for the argument object.
 _ARG_KEYS = ("arguments", "input", "parameters", "params", "args", "tool_input")
@@ -65,6 +65,37 @@ _MAX_VALUE_CHARS = 20_000
 # Wrapper keys worth descending into. Deliberately not "tools"/"functions": those hold
 # a *catalogue* of tools, and a model quoting the tool list back is not calling one.
 _WRAPPER_KEYS = ("tool_calls", "tool_call", "calls", "function_call", "invoke")
+
+# Names from the *protocol's* own vocabulary. A model that emits one of these as the
+# tool name has wrapped the real call one level too deep - it named the envelope
+# ("emit a tool_use block") instead of the tool inside it.
+_ENVELOPE_NAMES = frozenset(
+    {"tool_use", "tool_call", "tool_calls", "tool", "function", "function_call", "call", "invoke"}
+)
+
+
+def _canonical_name(name: str, valid: frozenset[str]) -> str:
+    """Map a model's spelling of a tool name onto the registered one, or ``""``.
+
+    Exact match first; then the spellings models reach for when they paraphrase the
+    identifier instead of copying it - a recipient prefix (``functions.get_strings``),
+    dashes or spaces for underscores, and camel case (``getStrings``).
+    """
+    name = name.strip()
+    if name in valid:
+        return name
+    if "." in name:
+        tail = name.rsplit(".", 1)[-1]
+        if tail in valid:
+            return tail
+        name = tail
+    squashed = re.sub(r"[^a-z0-9]", "", name.lower())
+    if not squashed:
+        return ""
+    for candidate in valid:
+        if re.sub(r"[^a-z0-9]", "", candidate.lower()) == squashed:
+            return candidate
+    return ""
 
 
 @dataclass(frozen=True)
@@ -173,11 +204,24 @@ def _calls_from_value(value: Any, valid: frozenset[str], out: list[SalvagedCall]
             break
     if not name:
         return
-    # Some templates prefix the recipient, e.g. "functions.list_functions".
-    if name not in valid and "." in name:
-        name = name.rsplit(".", 1)[-1]
-    if name not in valid:
+    canonical = _canonical_name(name, valid)
+    if not canonical:
+        # Not a tool - but the real call may be nested one level down, under a name
+        # borrowed from the protocol ({"name": "tool_use", "arguments": {"name":
+        # "list_functions", "input": {...}}}). Descend only when something real is
+        # actually in there, so prose that merely mentions a call stays inert.
+        if name.lower() in _ENVELOPE_NAMES:
+            for key in _ARG_KEYS:
+                nested = _coerce_args(value.get(key))
+                if not nested:
+                    continue
+                found: list[SalvagedCall] = []
+                _calls_from_value(nested, valid, found)
+                if found:
+                    out.extend(found[: _MAX_CALLS - len(out)])
+                    return
         return
+    name = canonical
 
     args: dict[str, Any] | None = None
     for key in _ARG_KEYS:
@@ -242,6 +286,23 @@ def _clean(text: str, spans: list[tuple[int, int]]) -> str:
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def repair_call(name: str, args: Any, valid_names: Iterable[str]) -> SalvagedCall | None:
+    """Map a *structured* call whose name is not a registered tool onto the one it meant.
+
+    The wire path needs this as much as the text path: a model that has been told to
+    "emit a tool_use block" will sometimes put ``tool_use`` in ``function.name`` and
+    the real call in the arguments, which the host would otherwise execute as a tool
+    that does not exist. Returns ``None`` when nothing recognizable is in there, so
+    the caller can still hand the model an ``unknown_tool`` result to react to.
+    """
+    valid = frozenset(n for n in valid_names if n)
+    if not name or not valid:
+        return None
+    found: list[SalvagedCall] = []
+    _calls_from_value({"name": name, "arguments": _coerce_args(args) or {}}, valid, found)
+    return found[0] if found else None
 
 
 def extract_tool_calls(

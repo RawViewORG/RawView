@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.3.4
+
+### Fixes the agent loop on Ollama and other local runners
+
+An agent session on a local model died on its **first tool call**. Two independent
+bugs, either of which was enough to end the run:
+
+**1. Ollama's OpenAI shim rejects every tool-result turn (HTTP 500).**
+
+```
+agent_error {"message": "Ollama (local) returned HTTP 500: no user query found in messages"}
+```
+
+Ollama's `/v1/chat/completions` renders some chat templates - Qwen3 among them - by
+looking for the last user query, and rejects the whole request when the transcript ends
+on tool results. That is what *every* turn after the first tool call looks like, so the
+agent loop could never get past one round trip: the tool ran, its result went back, and
+the next request 500'd. Requests without tools were unaffected, which is why chat looked
+fine until the agent actually did something.
+
+RawView now heals that request the way it already heals other endpoint quirks - by
+reacting to what the server complained about. A trailing user turn is appended after the
+tool results, and the quirk is remembered for the rest of the session so the failed round
+trip is paid at most once. Endpoints that never needed it are untouched.
+
+**2. A tool call named `tool_use` was executed as a tool.**
+
+```
+tool call tool_use id=call_ju4sey7g
+tool result tool_use {"error": "unknown_tool:tool_use"}
+```
+
+Told to "emit a `tool_use` block", smaller models sometimes put `tool_use` in
+`function.name` and the call they actually meant in the arguments
+(`{"name": "list_functions", "input": {...}}`) - the envelope named instead of the tool
+inside it. RawView already validated tool names recovered from plain text, but calls
+that arrived through the API's structured `tool_calls` field went to the host unchecked,
+so a whole turn burned on a tool that does not exist.
+
+Structured calls are now checked against the real tool registry and unwrapped when the
+arguments name a genuine tool. The same pass also maps the spellings models reach for
+when they paraphrase an identifier instead of copying it - `functions.get_strings`,
+`ListFunctions`, `list-functions`. Names that resolve to nothing are still handed back
+as `unknown_tool` for the model to react to, and prose that merely mentions a tool stays
+inert.
+
+Both fixes live in the OpenAI-compatible backend, so they apply to every local runner
+behind it - Ollama, LM Studio, llama.cpp, vLLM - not just Ollama.
+
 ## 1.3.3
 
 ### CRITICAL security: Ghidra >= 12.1 + optional sandboxed engine
