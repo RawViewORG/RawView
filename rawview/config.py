@@ -16,6 +16,12 @@ _RAWVIEW_THEME_IDS = frozenset(_RAWVIEW_THEME_IDS_TUPLE)
 def user_data_dir() -> Path:
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))) / "RawView"
+    elif sys.platform == "darwin":
+        # ~/Library/Application Support is where a macOS app is expected to keep this,
+        # but an XDG dir already in place belongs to someone who ran from source before
+        # there were mac packages - keep using it rather than stranding their sessions.
+        legacy = Path(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))) / "RawView"
+        base = legacy if legacy.is_dir() else Path(os.path.expanduser("~/Library/Application Support")) / "RawView"
     else:
         base = Path(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))) / "RawView"
     base.mkdir(parents=True, exist_ok=True)

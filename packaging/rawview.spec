@@ -21,6 +21,15 @@ if not _entry.is_file():
         "Cannot find rawview/__main__.py. From the repo root run:  python -m pip install -e ."
     )
 
+_version = "0.0.0"
+for _init in (REPO_ROOT / "rawview" / "__init__.py", REPO_ROOT / "build" / "lib" / "rawview" / "__init__.py"):
+    if _init.is_file():
+        for _line in _init.read_text(encoding="utf-8").splitlines():
+            if _line.startswith("__version__"):
+                _version = _line.split("=", 1)[1].strip().strip('"\'')
+                break
+        break
+
 _res = REPO_ROOT / "rawview" / "qt_ui" / "resources"
 if not _res.is_dir():
     _res = REPO_ROOT / "build" / "lib" / "rawview" / "qt_ui" / "resources"
@@ -102,7 +111,12 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-_app_ico = REPO_ROOT / "rawview" / "qt_ui" / "resources" / "app_icon.ico"
+_is_macos = sys.platform == "darwin"
+_res_dir = REPO_ROOT / "rawview" / "qt_ui" / "resources"
+# macOS wants .icns; build-macos.sh generates it from app_icon.png next to the .ico.
+_app_ico = _res_dir / ("app_icon.icns" if _is_macos else "app_icon.ico")
+if _is_macos and not _app_ico.is_file():
+    _app_ico = _res_dir / "app_icon.png"
 _exe_icon = str(_app_ico) if _app_ico.is_file() else None
 
 exe = EXE(
@@ -134,3 +148,41 @@ coll = COLLECT(
     upx_exclude=[],
     name="RawView",
 )
+
+# macOS ships an .app bundle: Finder will not launch a bare COLLECT directory, and
+# only a bundle carries the Info.plist that makes the window a real windowed app
+# (Dock icon, menu bar) instead of a background process.
+if _is_macos:
+    app = BUNDLE(
+        coll,
+        name="RawView.app",
+        icon=_exe_icon,
+        bundle_identifier="org.rawview.RawView",
+        info_plist={
+            "CFBundleName": "RawView",
+            "CFBundleDisplayName": "RawView",
+            "CFBundleShortVersionString": _version,
+            "CFBundleVersion": _version,
+            "NSHighResolutionCapable": True,
+            # RawView is a normal windowed app, not an agent/daemon.
+            "LSUIElement": False,
+            # Ghidra 12.1 needs a JDK 21 runtime; RawView downloads one on first run.
+            "LSMinimumSystemVersion": "12.0",
+            "NSRequiresAquaSystemAppearance": False,
+            # The user picks binaries to analyze through the File dock, and drops are
+            # accepted onto the window - declare the type so Finder can hand files over.
+            "CFBundleDocumentTypes": [
+                {
+                    "CFBundleTypeName": "Binary",
+                    "CFBundleTypeRole": "Viewer",
+                    "LSHandlerRank": "Alternate",
+                    "LSItemContentTypes": [
+                        "public.executable",
+                        "public.unix-executable",
+                        "com.microsoft.windows-executable",
+                        "public.data",
+                    ],
+                }
+            ],
+        },
+    )

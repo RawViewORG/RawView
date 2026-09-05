@@ -142,6 +142,90 @@ jobs:
             dist_installer/*.rpm
           if-no-files-found: error
 
+  # ── macOS: .dmg (Apple Silicon + Intel) ───────────────────────────────────
+  macos:
+    name: macOS ${{ matrix.label }} disk image
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-14 runners are arm64; macos-13 is the last Intel image.
+          - runner: macos-14
+            label: Apple Silicon
+          - runner: macos-13
+            label: Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,discord]"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Download and extract Ghidra
+        run: |
+          url="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip"
+          zip_path="$RUNNER_TEMP/ghidra.zip"
+          extract_dir="$RUNNER_TEMP/ghidra"
+          curl -fL --retry 3 -o "$zip_path" "$url"
+          unzip -q "$zip_path" -d "$extract_dir"
+          inner=$(find "$extract_dir" -maxdepth 1 -type d -name "ghidra_*_PUBLIC" | head -1)
+          echo "GHIDRA_INSTALL_DIR=$inner" >> "$GITHUB_ENV"
+
+      - name: Compile Java bridge
+        run: python -m rawview.scripts.compile_java
+
+      - name: Import smoke (the app must start before we package it)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python - <<'PY'
+          import importlib
+          # Same chain the app walks at startup, on the platform we are packaging for.
+          for name in [
+              "rawview.config",
+              "rawview.agent.providers",
+              "rawview.agent.brain",
+              "rawview.agent.conversation_summarize",
+              "rawview.qt_ui.settings_dialog",
+              "rawview.qt_ui.main_window",
+          ]:
+              importlib.import_module(name)
+              print("ok", name)
+          PY
+
+      - name: Build .app and .dmg
+        run: bash build-macos.sh
+
+      - name: Bundle smoke (the .app must be signed and launchable)
+        run: |
+          set -euo pipefail
+          app="dist/RawView.app"
+          test -x "$app/Contents/MacOS/RawView"
+          plutil -lint "$app/Contents/Info.plist"
+          codesign --verify --deep --strict "$app"
+          echo "bundle arch: $(lipo -archs "$app/Contents/MacOS/RawView")"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-${{ matrix.runner }}
+          path: dist_installer/*.dmg
+          if-no-files-found: error
+
   # ── Windows: .msi ─────────────────────────────────────────────────────────
   windows:
     name: Windows MSI
@@ -213,7 +297,7 @@ jobs:
   # ── GitHub Release ─────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release
-    needs: [version, linux, windows]
+    needs: [version, linux, macos, windows]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -222,6 +306,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: linux-packages
+          path: dist_installer/
+
+      - name: Download macOS disk images
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macos-dmg-*
+          merge-multiple: true
           path: dist_installer/
 
       - name: Download Windows MSI
@@ -244,4 +335,5 @@ jobs:
             dist_installer/rawview_*.deb
             dist_installer/RawView-*.AppImage
             dist_installer/rawview-*.rpm
+            dist_installer/RawView-*.dmg
             dist_installer/RawView-*.msi

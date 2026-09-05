@@ -39,12 +39,18 @@ jobs:
 
   # ── Import smoke: the package actually imports on supported Pythons ───────────
   import-smoke:
-    name: Import smoke (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: Import smoke (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
+        include:
+          # macos-14 is arm64; the platform branches it exercises are the ones
+          # ubuntu never reaches.
+          - os: macos-14
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
 
@@ -56,6 +62,7 @@ jobs:
       # PySide6 links Qt GUI libs (libEGL/libGL/...) at import time even under the
       # offscreen platform; ubuntu-latest doesn't ship them.
       - name: Install Qt runtime libraries
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
@@ -85,3 +92,70 @@ jobs:
               importlib.import_module(name)
               print("ok", name)
           PY
+
+  # ── macOS packaging, on demand ────────────────────────────────────────────
+  # release.yml builds this for real on every tag; run it here from a branch to
+  # prove the .app/.dmg path before cutting one.
+  macos-package:
+    name: macOS package check (${{ matrix.label }})
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            label: Apple Silicon
+          - runner: macos-13
+            label: Intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,discord]"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Download and extract Ghidra
+        run: |
+          url="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip"
+          zip_path="$RUNNER_TEMP/ghidra.zip"
+          extract_dir="$RUNNER_TEMP/ghidra"
+          curl -fL --retry 3 -o "$zip_path" "$url"
+          unzip -q "$zip_path" -d "$extract_dir"
+          inner=$(find "$extract_dir" -maxdepth 1 -type d -name "ghidra_*_PUBLIC" | head -1)
+          echo "GHIDRA_INSTALL_DIR=$inner" >> "$GITHUB_ENV"
+
+      - name: Compile Java bridge
+        run: python -m rawview.scripts.compile_java
+
+      - name: Build .app and .dmg
+        run: bash build-macos.sh
+
+      - name: Bundle smoke (the .app must be signed and launchable)
+        run: |
+          set -euo pipefail
+          app="dist/RawView.app"
+          test -x "$app/Contents/MacOS/RawView"
+          plutil -lint "$app/Contents/Info.plist"
+          codesign --verify --deep --strict "$app"
+          lipo -archs "$app/Contents/MacOS/RawView"
+          ls -lh dist_installer/*.dmg
+
+      - name: Upload disk image
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-check-${{ matrix.runner }}
+          path: dist_installer/*.dmg
+          if-no-files-found: error
