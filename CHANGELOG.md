@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.3.6
+
+### macOS: the disk images actually work now
+
+1.3.5 added macOS packaging and shipped a build that could not analyze anything. The
+disk images were pulled from that release; these are the ones to use.
+
+**Ghidra does not ship macOS native binaries.** Its own `GettingStarted.md` is explicit:
+an official release carries natives for Windows x86-64, Windows ARM64 and Linux x86-64,
+while macOS (both architectures), Linux ARM64 and FreeBSD are supported only *with
+user-built native binaries*, produced by the user with `gradle buildNatives`. Without
+`decompile` and `sleigh` for the platform, RawView opened, downloaded Ghidra, and then
+failed the moment a binary was opened.
+
+Requiring Gradle and the Xcode command line tools from someone who downloaded a `.dmg`
+is not a reasonable prerequisite, so RawView now builds those binaries itself:
+
+- Each macOS builder runs `gradlew buildNatives` for its own architecture, and the
+  results are bundled into the app - `decompile`, `sleigh`, both GNU demanglers and
+  `lzfse`, as native `arm64` or `x86_64` Mach-O binaries.
+- On the way to starting the JVM, RawView installs them into whichever Ghidra install is
+  in use, so a Ghidra you configured yourself is covered as well as the downloaded one.
+  The step is idempotent, sets the execute bit, and leaves other platforms' directories
+  alone.
+- Ghidra is Apache-2.0, so redistributing binaries built from it is fine.
+
+Verified end to end on macOS hardware: the app opens a binary and analyzes it.
+
+Two build-side lessons are now enforced in CI, because the 1.3.5 packages passed every
+check that existed and were still useless:
+
+- The bundle smoke fails unless `decompile` and `sleigh` are present and executable
+  inside the `.app`, and packaging refuses to run at all with an empty natives tree
+  (`RAWVIEW_REQUIRE_GHIDRA_NATIVES=1`). Checking that a package is *well-formed* is not
+  the same as checking that it can do its job.
+- Installing the natives walks the bundle with symlink following. `Path.rglob` skips
+  symlinked directories, and PyInstaller stores binaries under `Contents/Frameworks`
+  while leaving symlinks in `Contents/Resources` - walking the wrong side found one
+  stray README and none of the binaries, which would have shipped broken a second time.
+
+### Also
+
+- The Ghidra JVM sandbox is now used only when the host is Linux **and** `bwrap` is
+  actually installed. It was previously gated on "not Windows", so it built a bubblewrap
+  command line on machines with no such binary and the JVM launch died at spawn - macOS
+  always, and any Linux host without bubblewrap. Those hosts now launch the JVM directly.
+- macOS user data lives in `~/Library/Application Support/RawView`, unless an XDG
+  directory is already there from a source install.
+- **Minimum macOS is 13**, a floor set by the bundled Qt (PySide6 ships a single
+  `macosx_13_0` wheel).
+
 ## 1.3.5
 
 ### macOS support
