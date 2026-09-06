@@ -33,23 +33,33 @@ def main() -> int:
         return 0
 
     dest_root = Path(__file__).resolve().parent.parent / "ghidra_natives"
-    count = collect_from_install(root, dest_root, key)
-    if count == 0:
+    written = collect_from_install(root, dest_root, key)
+    if not written:
         print(
             f"No os/{key} binaries found under {root}. Did `gradlew buildNatives` run?",
             file=sys.stderr,
         )
         return 1
 
+    print(f"Collected {len(written)} native file(s) for {key} into {dest_root / key}")
+    for rel in sorted(written):
+        size = (dest_root / key / rel).stat().st_size // 1024
+        print(f"  {rel}  ({size} KB)")
+
     decompile = dest_root / key / "Ghidra" / "Features" / "Decompiler" / "os" / key / "decompile"
     if not decompile.is_file():
-        print(f"Collected {count} file(s) but {decompile.name} is missing.", file=sys.stderr)
+        # Listing what *was* found beats a bare "missing": it says whether the build
+        # produced nothing, or produced it somewhere the path mapping did not expect.
+        print(
+            f"\nERROR: {decompile} is missing - Ghidra cannot analyze without it.\n"
+            f"Raw os/{key} paths present under the Ghidra tree:",
+            file=sys.stderr,
+        )
+        for d in sorted(root.rglob(f"os/{key}")):
+            for f in sorted(d.rglob("*")):
+                if f.is_file():
+                    print(f"  {f.relative_to(root)}", file=sys.stderr)
         return 1
-
-    print(f"Collected {count} native file(s) for {key} into {dest_root / key}")
-    for f in sorted((dest_root / key).rglob("*")):
-        if f.is_file():
-            print(f"  {f.relative_to(dest_root / key)}  ({f.stat().st_size // 1024} KB)")
     return 0
 
 

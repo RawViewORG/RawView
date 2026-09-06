@@ -131,25 +131,49 @@ def ensure_natives(ghidra_root: Path) -> int:
         return 0
 
 
-def collect_from_install(ghidra_root: Path, dest_root: Path, platform_key: str | None = None) -> int:
-    """Build-time: harvest freshly built ``os/<platform>`` trees out of a Ghidra install.
+def install_relative_path(rel: Path, key: str) -> Path:
+    """Map a built native's path onto where a Ghidra *install* expects it.
 
-    Used by CI after ``gradlew buildNatives`` to populate the tree this module ships.
-    Returns the number of files collected.
+    ``gradlew buildNatives`` links into the module's Gradle output tree, e.g.
+    ``Ghidra/Features/Decompiler/build/os/mac_arm_64/decompile``, while a Ghidra
+    install loads the same binary from ``Ghidra/Features/Decompiler/os/mac_arm_64/``.
+    Collecting the literal path would bundle binaries Ghidra never looks at.
+    """
+    parts = list(rel.parts)
+    for i in range(len(parts) - 1):
+        if parts[i] == "os" and parts[i + 1] == key:
+            module = parts[:i]
+            # Drop the Gradle output segment when the build wrote through one.
+            while module and module[-1] in ("build", "bin"):
+                module = module[:-1]
+            return Path(*module, "os", key, *parts[i + 2 :])
+    return rel
+
+
+def collect_from_install(
+    ghidra_root: Path, dest_root: Path, platform_key: str | None = None
+) -> list[Path]:
+    """Build-time: harvest freshly built ``os/<platform>`` binaries out of a Ghidra tree.
+
+    Used by CI after ``gradlew buildNatives``. Returns the install-relative paths
+    written, so the caller can report exactly what a bundle will carry.
     """
     key = platform_key or current_platform_key()
     if key is None:
         raise RuntimeError("collect_from_install needs a macOS platform key")
     dest = dest_root / key
-    collected = 0
+    written: list[Path] = []
     for os_dir in sorted(ghidra_root.rglob(f"os/{key}")):
         if not os_dir.is_dir():
             continue
         for src in sorted(os_dir.rglob("*")):
             if src.is_dir():
                 continue
-            target = dest / src.relative_to(ghidra_root)
+            rel = install_relative_path(src.relative_to(ghidra_root), key)
+            target = dest / rel
+            if target.is_file():
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, target)
-            collected += 1
-    return collected
+            written.append(rel)
+    return written
