@@ -20,7 +20,7 @@ AI-assisted reverse engineering for **Ghidra**: a **Qt (PySide6)** desktop app t
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL%20v3-blue" alt="GPL v3"></a>
-  <img src="https://img.shields.io/badge/platform-Windows-blue" alt="Windows">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue" alt="Windows | Linux | macOS">
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
 </p>
 
@@ -36,16 +36,16 @@ AI-assisted reverse engineering for **Ghidra**: a **Qt (PySide6)** desktop app t
 
 - Open binaries and run analysis through Ghidra without using the Ghidra Swing UI for day-to-day navigation.
 - Docked panes, themes, shortcuts, work notes, and optional RE session archives (`.rvre.zip` style workflow).
-- Windows-focused packaging: **PyInstaller** onedir + **WiX** per-user MSI. Use the repo **Releases** tab for prebuilt installers when the maintainer uploads them.
+- Packaged for all three desktops: **PyInstaller** onedir plus a per-user **WiX MSI** (Windows), `.deb`/`.rpm`/`.AppImage` (Linux), and a signed-ad-hoc `.app` inside a `.dmg` (macOS, Apple Silicon and Intel). Prebuilt installers are on the **Releases** tab.
 
 ## Requirements
 
 | | |
 |--|--|
-| OS | **Windows** (primary; scripts and MSI are Windows-oriented) |
+| OS | **Windows 10/11**, **Linux**, or **macOS 13+** (Apple Silicon or Intel; the floor is PySide6's, whose macOS wheels are `macosx_13_0`) |
 | Python | **3.11+** |
 | Ghidra | Your own install or official ZIP; configured inside the app |
-| JDK | **21+** for compiling the Java bridge; the app can fetch Temurin into `%LOCALAPPDATA%\RawView\` on first run |
+| JDK | **21+** for compiling the Java bridge; the app can fetch Temurin on first run (`%LOCALAPPDATA%\RawView\`, `~/.local/share/RawView/`, or `~/Library/Application Support/RawView/`) |
 
 ## Build from source
 
@@ -78,6 +78,29 @@ Output:
 
 Rebuild WiX only (reuse `dist\RawView`): `.\scripts\build-msi.ps1 -SkipPyInstaller` (the script still runs `pip install ".[dev]"` and refreshes `BUNDLED_PYTHON_PACKAGES.txt` before harvesting).
 
+## macOS .app and .dmg (from this repo)
+
+From the repo root, with the venv active:
+
+```bash
+bash build-macos.sh              # dist/RawView.app + dist_installer/RawView-<version>-<arch>.dmg
+bash build-macos.sh --skip-dmg   # bundle only
+```
+
+The script renders `app_icon.icns` from the PNG, runs PyInstaller against `packaging/rawview.spec`
+(which adds the `BUNDLE` step on macOS), then **ad-hoc signs** the bundle - Apple Silicon refuses to
+run unsigned native code, so this is required, not cosmetic.
+
+The `.dmg` is **not notarized**. On first launch macOS will say the app "cannot be opened because the
+developer cannot be verified". Right-click the app → **Open** → **Open**, or clear the quarantine flag:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/RawView.app
+```
+
+The Ghidra JVM sandbox is Linux-only (bubblewrap builds on Linux namespaces), so macOS runs the JVM
+unsandboxed, the same as Windows.
+
 ## Repository layout
 
 | Path | Purpose |
@@ -85,6 +108,7 @@ Rebuild WiX only (reuse `dist\RawView`): `.\scripts\build-msi.ps1 -SkipPyInstall
 | `rawview/` | Application code; Java bridge **sources** under `rawview/java/` |
 | `packaging/` | `rawview.spec`, WiX `Product.wxs`, icons |
 | `scripts/` | `build-windows.ps1`, `build-msi.ps1`, `export-source-zip.ps1` |
+| `build-*.sh` | Linux (`build-linux.sh`, `build-deb.sh`, `build-rpm.sh`, `build-appimage.sh`) and macOS (`build-macos.sh`) package builds |
 | `installer/` | Windows installer build notes (`BUILD.txt`) |
 | `pip/` | Helper scripts for editable installs in a dedicated folder |
 | `LICENSE` | GPLv3 full text |
@@ -125,7 +149,7 @@ On Linux with [bubblewrap](https://github.com/containers/bubblewrap), RawView ca
 - The **project dir** is the only writable host tree.
 - Py4J stays loopback-only; network namespace is shared.
 
-This means a compromise of the Ghidra process — e.g. an unknown importer/decompiler bug in the parser — **cannot read your `~/.ssh`, wallets, browsers, or other host files**. Set `RAWVIEW_SANDBOX=none` to disable, or `bwrap` to enable. Windows always uses `none` (no bwrap).
+This means a compromise of the Ghidra process — e.g. an unknown importer/decompiler bug in the parser — **cannot read your `~/.ssh`, wallets, browsers, or other host files**. Set `RAWVIEW_SANDBOX=none` to disable, or `bwrap` to enable. The sandbox is used only on Linux **when the `bwrap` binary is actually present**; Windows and macOS always run the JVM unsandboxed, and so does a Linux box without bubblewrap installed (`sudo apt install bubblewrap`).
 
 > Best practice: for highly hostile samples, still consider a dedicated analysis **VM**; the sandbox removes file access, but shared-kernel+network residual risk remains.
 

@@ -132,6 +132,21 @@ def _classpath_items(java_args: list[str]) -> list[str]:
     return [c for c in cp.split(sep) if c]
 
 
+def _bwrap_available() -> bool:
+    """Whether the bubblewrap sandbox can actually be used on this host.
+
+    bubblewrap is Linux-only (it is built on Linux mount/user namespaces), and even on
+    Linux it is a separate package that many distros do not install by default. The
+    sandbox arguments build fine without it, so an unguarded attempt only fails later
+    at ``Popen`` with ``FileNotFoundError: bwrap`` - i.e. the JVM never starts and the
+    app looks broken. Checking here is what makes the sandbox the documented
+    "on by default where available" rather than a hard requirement.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    return shutil.which("bwrap") is not None
+
+
 def _build_bwrap_mounts_and_rewrite(
     *,
     java_exe: Path,
@@ -394,7 +409,7 @@ class GhidraBridgeController:
                 logger.info("Using Java @argfile (command line length ~%s): %s", approx, argf)
                 return [exe, f"@{argf.resolve()}"], argf
         plain = [exe] + java_args
-        if self.sandbox == "bwrap" and not sys.platform.startswith("win"):
+        if self.sandbox == "bwrap" and _bwrap_available():
             try:
                 classes_root = self.java_classes_dir
                 if classes_root is None:
