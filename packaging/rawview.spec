@@ -184,8 +184,11 @@ if _is_macos:
             "NSHighResolutionCapable": True,
             # RawView is a normal windowed app, not an agent/daemon.
             "LSUIElement": False,
-            # Ghidra 12.1 needs a JDK 21 runtime; RawView downloads one on first run.
-            "LSMinimumSystemVersion": "12.0",
+            # Bounded by the bundled Qt, not by our own code: PySide6 6.11 ships a
+            # single macosx_13_0_universal2 wheel, so the frozen app cannot load on
+            # macOS 12. Claiming 12.0 here would turn a clean "requires macOS 13"
+            # refusal into a dyld crash after launch.
+            "LSMinimumSystemVersion": "13.0",
             "NSRequiresAquaSystemAppearance": False,
             # The user picks binaries to analyze through the File dock, and drops are
             # accepted onto the window - declare the type so Finder can hand files over.

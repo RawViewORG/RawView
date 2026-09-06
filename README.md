@@ -42,7 +42,7 @@ AI-assisted reverse engineering for **Ghidra**: a **Qt (PySide6)** desktop app t
 
 | | |
 |--|--|
-| OS | **Windows 10/11**, **Linux**, or **macOS 12+** (Apple Silicon or Intel) |
+| OS | **Windows 10/11**, **Linux**, or **macOS 13+** (Apple Silicon or Intel; the floor is PySide6's, whose macOS wheels are `macosx_13_0`) |
 | Python | **3.11+** |
 | Ghidra | Your own install or official ZIP; configured inside the app |
 | JDK | **21+** for compiling the Java bridge; the app can fetch Temurin on first run (`%LOCALAPPDATA%\RawView\`, `~/.local/share/RawView/`, or `~/Library/Application Support/RawView/`) |
