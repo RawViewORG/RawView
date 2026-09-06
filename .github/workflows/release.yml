@@ -150,10 +150,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-14 runners are arm64; macos-13 is the last Intel image.
+          # macos-14 is arm64. macos-13 was retired on 2025-12-04, so Intel builds
+          # use macos-15-intel - the last x86_64 image, available until Aug 2027.
           - runner: macos-14
             label: Apple Silicon
-          - runner: macos-13
+          - runner: macos-15-intel
             label: Intel
     runs-on: ${{ matrix.runner }}
     steps:

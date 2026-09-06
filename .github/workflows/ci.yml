@@ -105,7 +105,7 @@ jobs:
         include:
           - runner: macos-14
             label: Apple Silicon
-          - runner: macos-13
+          - runner: macos-15-intel
             label: Intel
     runs-on: ${{ matrix.runner }}
     steps:
