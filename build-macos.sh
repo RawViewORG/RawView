@@ -49,6 +49,20 @@ if [ -n "${GHIDRA_INSTALL_DIR:-}" ] && [ ! -f "$MARKER" ]; then
     python -m rawview.scripts.compile_java
 fi
 
+# Ghidra ships no macOS natives (its GettingStarted.md: official releases cover Windows
+# and Linux x86-64 only). Build them here so the bundle can carry them; without this the
+# app installs fine and then cannot analyze a single binary.
+NATIVES_KEY="mac_arm_64"
+[ "$ARCH" = "x86_64" ] && NATIVES_KEY="mac_x86_64"
+if [ -n "${GHIDRA_INSTALL_DIR:-}" ] && [ ! -d "rawview/ghidra_natives/$NATIVES_KEY" ]; then
+    if [ ! -f "$GHIDRA_INSTALL_DIR/Ghidra/Features/Decompiler/os/$NATIVES_KEY/decompile" ]; then
+        echo "Building Ghidra native binaries for $NATIVES_KEY (needs Xcode Command Line Tools)..."
+        (cd "$GHIDRA_INSTALL_DIR/support/gradle" && ./gradlew buildNatives)
+    fi
+    echo "Collecting Ghidra natives into the package..."
+    python -m rawview.scripts.collect_ghidra_natives
+fi
+
 # PyInstaller wants .icns on macOS; the repo only carries .png/.ico, so render one.
 ICNS="rawview/qt_ui/resources/app_icon.icns"
 PNG="rawview/qt_ui/resources/app_icon.png"

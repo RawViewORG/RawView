@@ -208,16 +208,35 @@ jobs:
               print("ok", name)
           PY
 
+      - name: Build Ghidra native binaries
+        run: |
+          set -euo pipefail
+          cd "$GHIDRA_INSTALL_DIR/support/gradle"
+          ./gradlew buildNatives
+          cd "$GITHUB_WORKSPACE"
+          python -m rawview.scripts.collect_ghidra_natives
+
       - name: Build .app and .dmg
+        env:
+          # No natives, no build - shipping a mac package that cannot analyze is worse
+          # than failing the release.
+          RAWVIEW_REQUIRE_GHIDRA_NATIVES: "1"
         run: bash build-macos.sh
 
-      - name: Bundle smoke (the .app must be signed and launchable)
+      - name: Bundle smoke (signed, launchable, and able to analyze)
         run: |
           set -euo pipefail
           app="dist/RawView.app"
           test -x "$app/Contents/MacOS/RawView"
           plutil -lint "$app/Contents/Info.plist"
           codesign --verify --deep --strict "$app"
+          # Ghidra ships no macOS natives; a bundle without ours opens fine and then
+          # cannot analyze anything, which is how v1.3.5 shipped broken. Fail here instead.
+          key="mac_arm_64"; [ "$(uname -m)" = "x86_64" ] && key="mac_x86_64"
+          nat="$app/Contents/Resources/rawview/ghidra_natives/$key/Ghidra/Features/Decompiler/os/$key"
+          test -x "$nat/decompile"
+          test -x "$nat/sleigh"
+          echo "bundled natives: $(file -b "$nat/decompile")"
           echo "bundle arch: $(lipo -archs "$app/Contents/MacOS/RawView")"
 
       - name: Upload macOS artifacts

@@ -49,6 +49,20 @@ else:
     if _base_share.is_dir():
         datas.append((str(_base_share), "share/py4j"))
 
+# Ghidra's macOS natives, harvested by rawview.scripts.collect_ghidra_natives after
+# `gradlew buildNatives` on the builder. An official Ghidra release has none for macOS,
+# so without these the app opens but cannot analyze anything.
+_natives = REPO_ROOT / "rawview" / "ghidra_natives"
+if _is_macos:
+    if _natives.is_dir() and any(_natives.iterdir()):
+        datas.append((str(_natives), "rawview/ghidra_natives"))
+    elif os.environ.get("RAWVIEW_REQUIRE_GHIDRA_NATIVES") == "1":
+        raise SystemExit(
+            "rawview/ghidra_natives is empty. On a macOS builder run:\n"
+            "  cd \"$GHIDRA_INSTALL_DIR/support/gradle\" && ./gradlew buildNatives\n"
+            "  python -m rawview.scripts.collect_ghidra_natives"
+        )
+
 # Ghidra JVM bridge: .class files from `python -m rawview.scripts.compile_java` (needs GHIDRA_INSTALL_DIR + JDK).
 _java_out = REPO_ROOT / "rawview" / "java" / "out"
 _java_marker = _java_out / "io" / "rawview" / "ghidra" / "GhidraServer.class"
