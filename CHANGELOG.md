@@ -1,5 +1,43 @@
 # Changelog
 
+## 1.3.5
+
+### macOS support
+
+RawView now ships a macOS build: an ad-hoc signed `RawView.app` inside a `.dmg`, for
+both Apple Silicon (arm64) and Intel (x86_64). `build-macos.sh` builds it locally; the
+release workflow builds both on every tag.
+
+Two platform bugs had to be fixed first, and one of them was not macOS-only:
+
+- **The Ghidra JVM could not start.** The bubblewrap sandbox was gated on "not Windows",
+  so macOS built a `bwrap …` command line for a binary that does not exist there and the
+  launch died at `Popen` with `FileNotFoundError`. The same held on **any Linux box
+  without bubblewrap installed**, despite 1.3.3 documenting the sandbox as active only
+  when `bwrap` is present - nothing ever checked. The sandbox is now used when the host
+  is Linux *and* `bwrap` is on `PATH`, and falls back to a plain JVM launch otherwise.
+- **User data now lands in `~/Library/Application Support/RawView`** on macOS, unless an
+  XDG directory is already there from a source install.
+
+Packaging notes:
+
+- The bundle drops PySide6's nested Qt developer tools (Assistant, Designer, Linguist).
+  PyInstaller rewrites those `.app` bundles to `Assistant__dot__app`, which is no longer
+  a valid bundle, and `codesign` then refuses the enclosing `RawView.app`. RawView
+  launches none of them. Linux and Windows packages are unchanged.
+- The `.dmg` is **ad-hoc signed but not notarized**. First launch needs right-click →
+  **Open**, or `xattr -dr com.apple.quarantine /Applications/RawView.app`.
+- **Minimum macOS is 13.** That floor comes from the bundled Qt: PySide6 6.11 publishes a
+  single `macosx_13_0_universal2` wheel. A 2016-era Mac maxes out at macOS 12 and cannot
+  run this build.
+- The Ghidra JVM sandbox stays Linux-only, so macOS runs the JVM unsandboxed, as Windows
+  does.
+
+CI builds and signs both architectures on every tag and verifies each bundle
+(`Info.plist` lint, `codesign --verify --deep --strict`, architecture check). **The
+macOS packages have not yet been run on real hardware** - the Linux and Windows packages
+remain the proven ones.
+
 ## 1.3.4
 
 ### Fixes the agent loop on Ollama and other local runners
