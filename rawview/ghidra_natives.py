@@ -20,6 +20,7 @@ Ghidra is Apache-2.0, so redistributing binaries built from it is fine.
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import shutil
 import stat
@@ -37,6 +38,22 @@ _BUNDLE_SUBDIR = "ghidra_natives"
 
 # A Ghidra install without this cannot analyze; used to decide whether to install.
 _SENTINEL = Path("Ghidra") / "Features" / "Decompiler" / "os"
+
+
+def _walk_files(root: Path) -> list[Path]:
+    """Every file under ``root``, descending through symlinked directories.
+
+    ``Path.rglob`` does not recurse into symlinked directories, and inside a macOS
+    .app that is exactly what these trees are: PyInstaller stores executables under
+    ``Contents/Frameworks`` and leaves symlinks behind in ``Contents/Resources``.
+    Walking with rglob from the Resources side finds one stray README and none of the
+    binaries, which would install nothing and fail identically to shipping nothing.
+    """
+    out: list[Path] = []
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=True):
+        for name in filenames:
+            out.append(Path(dirpath) / name)
+    return out
 
 
 def current_platform_key() -> str | None:
@@ -61,11 +78,18 @@ def bundled_natives_dir(platform_key: str | None = None) -> Path | None:
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         roots.append(Path(meipass) / "rawview")
+    fallback: Path | None = None
     for root in roots:
         candidate = root / _BUNDLE_SUBDIR / key
-        if candidate.is_dir():
+        if not candidate.is_dir():
+            continue
+        # is_file() follows symlinks, so this picks the root that can actually reach
+        # the decompiler rather than the first directory that merely exists.
+        if (candidate / _SENTINEL / key / "decompile").is_file():
             return candidate
-    return None
+        if fallback is None:
+            fallback = candidate
+    return fallback
 
 
 def natives_installed(ghidra_root: Path, platform_key: str | None = None) -> bool:
@@ -99,9 +123,7 @@ def install_natives(ghidra_root: Path, platform_key: str | None = None) -> int:
         return 0
 
     written = 0
-    for src in sorted(source.rglob("*")):
-        if src.is_dir():
-            continue
+    for src in sorted(_walk_files(source)):
         dest = ghidra_root / src.relative_to(source)
         if dest.is_file():
             continue
