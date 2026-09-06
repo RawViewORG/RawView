@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 
 import py4j
 
+from rawview.ghidra_natives import ensure_natives
+
 if TYPE_CHECKING:
     from py4j.java_gateway import JavaGateway
 
@@ -437,6 +439,10 @@ class GhidraBridgeController:
 
     def _spawn_and_connect(self) -> None:
         """Start JVM + Py4J, retrying if the listen port is still occupied (stale process / race)."""
+        # macOS Ghidra installs carry no native binaries of their own (see
+        # rawview.ghidra_natives); drop ours in before the JVM looks for a decompiler.
+        # Done here rather than at download time so a user-supplied install is covered too.
+        ensure_natives(self.ghidra_install_dir)
         last_err: RuntimeError | None = None
         cursor = self.py4j_port
         for attempt in range(24):

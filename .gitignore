@@ -31,3 +31,7 @@ rawview.env
 
 # Local RE workspace: binaries, dumps, agent notes; not for git push
 /rawview-re-workspace/
+
+# Ghidra macOS natives are built per-architecture on the macOS builder
+# (rawview.scripts.collect_ghidra_natives), never committed.
+rawview/ghidra_natives/
