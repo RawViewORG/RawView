@@ -21,6 +21,8 @@ if not _entry.is_file():
         "Cannot find rawview/__main__.py. From the repo root run:  python -m pip install -e ."
     )
 
+_is_macos = sys.platform == "darwin"
+
 _version = "0.0.0"
 for _init in (REPO_ROOT / "rawview" / "__init__.py", REPO_ROOT / "build" / "lib" / "rawview" / "__init__.py"):
     if _init.is_file():
@@ -82,9 +84,26 @@ hiddenimports = [
     "pypresence",
 ]
 
+def _drops_nested_app_bundle(entry) -> bool:
+    """Whether a collected PySide6 entry belongs to a nested .app inside the wheel.
+
+    PySide6 ships Qt's developer tools (Assistant, Designer, Linguist) and the
+    WebEngine helper as complete .app bundles. PyInstaller rewrites those paths to
+    ``Assistant__dot__app``, which is no longer a valid bundle, and `codesign` then
+    refuses the whole RawView.app with "the main executable or Info.plist must be a
+    regular file". RawView launches none of them, so they are dropped rather than
+    repaired. Non-macOS builds keep collecting everything as before.
+    """
+    dest = str(entry[1] if len(entry) > 1 else entry[0]).replace("\\", "/")
+    return ".app/" in dest or "__dot__app/" in dest
+
+
 for pkg in ("PySide6", "shiboken6"):
     try:
         d, b, h = collect_all(pkg)
+        if _is_macos:
+            d = [e for e in d if not _drops_nested_app_bundle(e)]
+            b = [e for e in b if not _drops_nested_app_bundle(e)]
         datas += d
         binaries += b
         hiddenimports += h
@@ -111,7 +130,6 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-_is_macos = sys.platform == "darwin"
 _res_dir = REPO_ROOT / "rawview" / "qt_ui" / "resources"
 # macOS wants .icns; build-macos.sh generates it from app_icon.png next to the .ico.
 _app_ico = _res_dir / ("app_icon.icns" if _is_macos else "app_icon.ico")

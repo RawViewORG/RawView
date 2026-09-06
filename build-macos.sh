@@ -77,7 +77,11 @@ fi
 # without this the .app dies at launch on every arm64 Mac.
 echo "Ad-hoc signing the bundle..."
 codesign --force --deep --sign - "$APP"
-codesign --verify --deep --strict "$APP" && echo "Signature OK"
+# Separate statements on purpose: under `set -e` a failing command on the left of
+# `&&` does not abort the script, which is how a bundle that fails verification
+# silently made it into a .dmg once already.
+codesign --verify --deep --strict "$APP"
+echo "Signature OK"
 
 if [ "$SKIP_DMG" -eq 1 ]; then
     echo ""
