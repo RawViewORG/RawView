@@ -1665,7 +1665,7 @@ class MainWindow(QMainWindow):
                 parts.append(f"{imgs} image{'s' if imgs != 1 else ''}")
             if docs:
                 parts.append(f"{docs} document{'s' if docs != 1 else ''}")
-            self._attach_preview.setText(f"📎 {', '.join(parts)} attached — will send with next message")
+            self._attach_preview.setText(f"📎 {', '.join(parts)} attached - will send with next message")
             self._attach_preview.setVisible(True)
 
     def _send_agent(self) -> None:
@@ -1754,7 +1754,7 @@ class MainWindow(QMainWindow):
             title = str(data.get("title", ""))
             if title:
                 self._chat_title = title
-                self._chat_title_label.setText(f"— {esc(title)}")
+                self._chat_title_label.setText(f"- {esc(title)}")
             return
         if kind == "assistant_stream_begin":
             self._stream_ts = ts

@@ -72,7 +72,7 @@ mkdir -p "$APPDIR"
 # Copy PyInstaller bundle into AppDir root
 cp -r "$DIST_BUNDLE/." "$APPDIR/"
 
-# AppRun — required entry point
+# AppRun - required entry point
 cat > "$APPDIR/AppRun" << 'APPRUN'
 #!/bin/sh
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -80,7 +80,7 @@ exec "$HERE/RawView" "$@"
 APPRUN
 chmod 755 "$APPDIR/AppRun"
 
-# Desktop file — must be at AppDir root; Exec= must be just the binary name
+# Desktop file - must be at AppDir root; Exec= must be just the binary name
 cat > "$APPDIR/rawview.desktop" << DESKTOP
 [Desktop Entry]
 Version=1.0
@@ -96,7 +96,7 @@ StartupWMClass=RawView
 DESKTOP
 chmod 644 "$APPDIR/rawview.desktop"
 
-# Icon — filename (without extension) must match Icon= field above
+# Icon - filename (without extension) must match Icon= field above
 if [ -f "$SCRIPT_DIR/rawview/qt_ui/resources/app_icon.png" ]; then
     cp "$SCRIPT_DIR/rawview/qt_ui/resources/app_icon.png" "$APPDIR/rawview.png"
 fi

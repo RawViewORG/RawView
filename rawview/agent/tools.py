@@ -555,7 +555,7 @@ def _build_registry(
                 "properties": {
                     "limit": {
                         "type": "integer",
-                        "description": "Max functions to return after filtering (1–50000). Omit to return all (can be huge).",
+                        "description": "Max functions to return after filtering (1-50000). Omit to return all (can be huge).",
                     },
                     "offset": {
                         "type": "integer",
@@ -637,7 +637,7 @@ def _build_registry(
             parameters_schema={
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Max rows after offset (1–50000). Omit for full list."},
+                    "limit": {"type": "integer", "description": "Max rows after offset (1-50000). Omit for full list."},
                     "offset": {"type": "integer", "description": "Skip this many strings (default 0)."},
                     "min_length": {
                         "type": "integer",
@@ -655,7 +655,7 @@ def _build_registry(
             parameters_schema={
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Max rows after offset (1–50000). Omit for full list."},
+                    "limit": {"type": "integer", "description": "Max rows after offset (1-50000). Omit for full list."},
                     "offset": {"type": "integer", "description": "Skip this many imports (default 0)."},
                 },
             },
@@ -971,7 +971,7 @@ def _build_registry(
                     "query": {"type": "string", "description": "Search query."},
                     "max_results": {
                         "type": "integer",
-                        "description": "Max result rows to return (1–12). Default 6.",
+                        "description": "Max result rows to return (1-12). Default 6.",
                     },
                     "fetch_primary_excerpt": {
                         "type": "boolean",

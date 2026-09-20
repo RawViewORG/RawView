@@ -38,13 +38,13 @@ echo ""
 
 # ── step 1: check alien ───────────────────────────────────────────────────────
 if ! command -v alien &>/dev/null; then
-    echo "[prereq] alien not found — installing..."
+    echo "[prereq] alien not found - installing..."
     sudo apt-get install -y alien
 fi
 
 # ── step 2: ensure .deb exists ───────────────────────────────────────────────
 if [ ! -f "$DEB_FILE" ]; then
-    echo "[1/2] .deb not found — building it first..."
+    echo "[1/2] .deb not found - building it first..."
     bash "$SCRIPT_DIR/build-deb.sh" $([ "$SKIP_PYINSTALLER" -eq 1 ] && echo "--skip-pyinstaller" || true)
 else
     echo "[1/2] Using existing $DEB_FILE"

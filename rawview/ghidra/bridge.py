@@ -461,8 +461,8 @@ class GhidraBridgeController:
         """
         Run ``fn(entry_point)`` *without* taking the RPC mutex.
 
-        Only for calls that must reach the JVM while another RPC is in flight — cancelling an
-        auto-analysis run that will otherwise hold the mutex for minutes — and only for JVM methods that
+        Only for calls that must reach the JVM while another RPC is in flight - cancelling an
+        auto-analysis run that will otherwise hold the mutex for minutes - and only for JVM methods that
         are cheap, non-blocking and safe to enter concurrently (``cancelAnalysis``, ``isAnalysisRunning``:
         neither is ``synchronized`` on the Java side, and both only touch a volatile flag). Py4J opens a
         separate socket per calling thread, so this does not disturb the in-flight call. Anything that

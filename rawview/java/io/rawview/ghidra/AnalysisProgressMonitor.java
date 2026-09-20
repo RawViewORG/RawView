@@ -90,7 +90,7 @@ public class AnalysisProgressMonitor extends TaskMonitorAdapter {
                 long max = getMaximum();
                 long prog = getProgress();
                 if (max <= 0) {
-                    // Range not yet initialized — show bouncing bar rather than a misleading 0%
+                    // Range not yet initialized - show bouncing bar rather than a misleading 0%
                     sb.append(",\"indeterminate\":true");
                 } else {
                     int pct = (int) Math.min(100L, Math.max(0L, (prog * 100L) / max));

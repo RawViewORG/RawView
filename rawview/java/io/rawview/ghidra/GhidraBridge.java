@@ -447,7 +447,7 @@ public class GhidraBridge {
      *
      * <p>Rows carry size / thunk / external flags and the current signature, and the filtering and
      * windowing happen in the JVM. {@link #listFunctionsJson()} has to marshal every function in the
-     * program through Py4J as one string before the caller can drop 99% of it — which is what both the
+     * program through Py4J as one string before the caller can drop 99% of it - which is what both the
      * agent's {@code limit} and the UI's symbol list were doing on binaries with 100k functions.
      *
      * @param offset first row to return (clamped at 0)
@@ -771,7 +771,7 @@ public class GhidraBridge {
     /**
      * JSON array of {@code {name,address,type}} for the program's exported symbols.
      *
-     * <p>Exports are Ghidra's external entry points — what a PE's export directory or an ELF's dynamic
+     * <p>Exports are Ghidra's external entry points - what a PE's export directory or an ELF's dynamic
      * symbol table publishes. The previous implementation listed the first 2000 primary symbols of any
      * kind, so the Exports pane filled up with string labels and section headers instead.
      */
@@ -839,7 +839,7 @@ public class GhidraBridge {
      * <p>Prefers loader-named entries ({@code entry}, {@code _start}, {@code main}, {@code DllMain}, …)
      * among the external entry points, then any external entry point that is a function, and finally the
      * image base. The previous implementation only looked for a primary symbol exactly at the image base,
-     * which for an ordinary ELF or PE is a header address with no symbol — so this returned {@code []}
+     * which for an ordinary ELF or PE is a header address with no symbol - so this returned {@code []}
      * for most binaries, including for the agent's orientation step.
      */
     public synchronized String getEntryPointsJson() throws Exception {
@@ -1062,7 +1062,7 @@ public class GhidraBridge {
      * Searches program memory for a byte pattern and returns every match, not just the first.
      *
      * <p>The pattern is hex bytes, with or without separators ({@code "48 89 E5"} or {@code "4889e5"}), and
-     * {@code ??} / {@code ..} stand for "any byte" — the wildcard form signatures are normally written in.
+     * {@code ??} / {@code ..} stand for "any byte" - the wildcard form signatures are normally written in.
      * Each match reports the containing function when there is one, so a hit is directly actionable.
      *
      * @param maxMatches match cap (1..1000)
@@ -1211,7 +1211,7 @@ public class GhidraBridge {
         return "{\"kind\":\"unknown\",\"address\":\"" + escapeJson(addr.toString()) + "\"}";
     }
 
-    /** Real CFG using BasicBlockModel — returns nodes (basic blocks) + edges (control flow) as JSON. */
+    /** Real CFG using BasicBlockModel - returns nodes (basic blocks) + edges (control flow) as JSON. */
     public synchronized String getControlFlowGraphJson(String addressText) throws Exception {
         ensureProgram();
         Function f = resolveFunction(addressText);
@@ -2769,8 +2769,8 @@ public class GhidraBridge {
      * Parses C type text and, when {@code addressText} names a valid address, lays the resulting type down
      * there.
      *
-     * <p>Accepts anything Ghidra's C parser understands — {@code struct Foo { int a; char *b; };},
-     * a {@code typedef}, an {@code enum} — and resolves field types against the program's own
+     * <p>Accepts anything Ghidra's C parser understands - {@code struct Foo { int a; char *b; };},
+     * a {@code typedef}, an {@code enum} - and resolves field types against the program's own
      * {@link ghidra.program.model.data.DataTypeManager}, so built-ins and types recovered by analysis
      * both work. Pass an empty address to only define the type without applying it.
      */
@@ -2941,7 +2941,7 @@ public class GhidraBridge {
      *
      * <p>Every write to a {@link Program} has to be inside a transaction. RawView used to write without
      * opening one and got away with it only because {@code GhidraProject.importProgram} leaves a
-     * "Batch Processing" transaction open — which is absent after {@link #openSavedProject}, gives the
+     * "Batch Processing" transaction open - which is absent after {@link #openSavedProject}, gives the
      * user a single undo step for the whole session, and rolls edits back wholesale if it is ever aborted.
      * A per-edit transaction also makes each rename/comment/retype separately undoable in Ghidra.
      */

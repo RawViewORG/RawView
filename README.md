@@ -134,10 +134,10 @@ Do **not** commit API keys, tokens, or `rawview.env` from your machine. Settings
 
 RawView analyzes untrusted binaries **through Ghidra's importers and native decompiler**. Ghidra releases before **12.1** have known high-severity vulnerabilities that a crafted binary can trigger during import or decompilation:
 
-- **CVE-2026-52757** (CVSS 7.8) — heap use-after-free in the decompiler's `HighVariable::merge()`, triggerable by a crafted binary.
-- **CVE-2026-52752** (CVSS 7.8) — SleighBuilder use-after-free, triggerable by decompiling a malicious binary.
-- **CVE-2026-52750** (CVSS 7.8) — Swift demangler arbitrary code execution via a malicious Ghidra project.
-- **CVE-2026-52753** (CVSS 5.5) — Mach-O export-trie out-of-memory (JVM crash).
+- **CVE-2026-52757** (CVSS 7.8) - heap use-after-free in the decompiler's `HighVariable::merge()`, triggerable by a crafted binary.
+- **CVE-2026-52752** (CVSS 7.8) - SleighBuilder use-after-free, triggerable by decompiling a malicious binary.
+- **CVE-2026-52750** (CVSS 7.8) - Swift demangler arbitrary code execution via a malicious Ghidra project.
+- **CVE-2026-52753** (CVSS 5.5) - Mach-O export-trie out-of-memory (JVM crash).
 
 RawView requires **Ghidra ≥ 12.1** to analyze hostile samples. The bundled default and `GHIDRA_BUNDLE_URL` point at the latest public release (auto-resolved at download time).
 
@@ -150,7 +150,7 @@ On Linux with [bubblewrap](https://github.com/containers/bubblewrap), RawView ca
 - The **project dir** is the only writable host tree.
 - Py4J stays loopback-only; network namespace is shared.
 
-This means a compromise of the Ghidra process — e.g. an unknown importer/decompiler bug in the parser — **cannot read your `~/.ssh`, wallets, browsers, or other host files**. Set `RAWVIEW_SANDBOX=none` to disable, or `bwrap` to enable. The sandbox is used only on Linux **when the `bwrap` binary is actually present**; Windows and macOS always run the JVM unsandboxed, and so does a Linux box without bubblewrap installed (`sudo apt install bubblewrap`).
+This means a compromise of the Ghidra process - e.g. an unknown importer/decompiler bug in the parser - **cannot read your `~/.ssh`, wallets, browsers, or other host files**. Set `RAWVIEW_SANDBOX=none` to disable, or `bwrap` to enable. The sandbox is used only on Linux **when the `bwrap` binary is actually present**; Windows and macOS always run the JVM unsandboxed, and so does a Linux box without bubblewrap installed (`sudo apt install bubblewrap`).
 
 > Best practice: for highly hostile samples, still consider a dedicated analysis **VM**; the sandbox removes file access, but shared-kernel+network residual risk remains.
 

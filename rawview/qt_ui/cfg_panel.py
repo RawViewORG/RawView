@@ -1,4 +1,4 @@
-"""Control Flow Graph panel — real basic block rendering via QGraphicsView."""
+"""Control Flow Graph panel - real basic block rendering via QGraphicsView."""
 
 from __future__ import annotations
 
@@ -140,7 +140,7 @@ class _BlockItem(QGraphicsRectItem):
         super().mouseReleaseEvent(event)
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        # Ignore drags (panning) — only handle clicks
+        # Ignore drags (panning) - only handle clicks
         if self._pressed_pos and (event.pos() - self._pressed_pos).manhattanLength() > 8:
             self._pressed_pos = None
             return
@@ -216,7 +216,7 @@ class CfgPanel(QWidget):
         if hasattr(self, '_last_data') and self._last_data:
             self.load_cfg_json(self._last_data)
 
-    def _show_placeholder(self, msg: str = "Select a function — CFG renders automatically.") -> None:
+    def _show_placeholder(self, msg: str = "Select a function; the CFG renders automatically.") -> None:
         self._scene.clear()
         from PySide6.QtWidgets import QGraphicsTextItem
         t = QGraphicsTextItem(msg)
@@ -267,7 +267,7 @@ class CfgPanel(QWidget):
         self._view.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
         self._view._zoom = 1.0
 
-        trunc = "  (truncated — too many blocks)" if truncated else ""
+        trunc = "  (truncated: too many blocks)" if truncated else ""
         self._status.setText(
             f"{fn_name}  ·  {len(nodes)} blocks  ·  {len(edges)} edges{trunc}"
             f"  ·  scroll=zoom  drag=pan  click block=navigate"

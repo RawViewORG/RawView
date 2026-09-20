@@ -265,7 +265,7 @@ __TOOL_PROTOCOL__
 - **`append_work_markdown`**: Append to a Work-dock note. `input`: `markdown` (string, required); optional `tab_title` (string).
 - **`read_agent_memory`**: Read persistent agent memory file. `input`: optional `max_chars` (integer) only; `{}` is valid.
 - **`append_agent_memory`**: Append durable session facts to persistent memory. `input`: `markdown` (string, required).
-- **`web_search`**: Read-only web lookup against the configured search provider; the result's `source` says which one answered. `input`: `query` (string, required); optional `max_results` (integer 1–12); optional `fetch_primary_excerpt` (boolean, slower). Use for docs/CVEs/vendor context; verify against primary sources.
+- **`web_search`**: Read-only web lookup against the configured search provider; the result's `source` says which one answered. `input`: `query` (string, required); optional `max_results` (integer 1-12); optional `fetch_primary_excerpt` (boolean, slower). Use for docs/CVEs/vendor context; verify against primary sources.
 - **`batch_run_tools`**: Run multiple tools in one host step. `input`: `calls` (array of `{name, input}`). Max 24; do not nest another `batch_run_tools`.
 - **`user_tip`**: Short UI tip for the user. `input`: `message` (string, required); use sparingly.
 
