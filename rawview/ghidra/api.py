@@ -355,6 +355,42 @@ class GhidraAPI:
         raw = str(self.bridge.invoke_java(lambda ep: ep.setFunctionSignature(address, signature)))
         return json.loads(raw)
 
+    def patch_bytes(self, address: str, hex_bytes: str) -> dict[str, Any]:
+        """Overwrite the bytes at ``address``. Returns the original and patched bytes as hex."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.patchBytesJson(address, hex_bytes)))
+        return json.loads(raw)
+
+    def assemble_instruction(
+        self, address: str, instruction: str, *, apply: bool = False
+    ) -> dict[str, Any]:
+        """
+        Assemble one instruction for ``address``.
+
+        With ``apply`` false nothing is written: the result carries the encoding, its length and
+        the length of the instruction it would replace, which is what tells you whether it fits.
+        """
+        raw = str(
+            self.bridge.invoke_java(
+                lambda ep: ep.assembleInstructionJson(address, instruction, bool(apply))
+            )
+        )
+        return json.loads(raw)
+
+    def list_patches(self) -> dict[str, Any]:
+        """Every byte run that differs from the imported file: ``{runs, count, truncated}``."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.listPatchesJson()))
+        return json.loads(raw)
+
+    def revert_patch(self, address: str, length: int = 0) -> dict[str, Any]:
+        """Restore the original file bytes at ``address``; ``length`` 0 reverts the whole run."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.revertPatchJson(address, int(length))))
+        return json.loads(raw)
+
+    def export_patched_file(self, out_path: str) -> dict[str, Any]:
+        """Write the imported file back out with every patch applied."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.exportPatchedFileJson(out_path)))
+        return json.loads(raw)
+
     def close_all(self) -> None:
         self.bridge.invoke_java(lambda ep: ep.closeAll())
 

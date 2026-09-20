@@ -165,6 +165,53 @@ def _check_engine(api: "GhidraAPI") -> list[str]:  # noqa: F821
     renamed = api.rename_function(addr, "rawview_smoke_renamed")
     check("rename_function", bool(renamed.get("ok")), renamed)
 
+    # Patching: write bytes, see them in the patch list, put them back.
+    before_dump = api.get_hex_dump(addr, 16, 16)
+    patched = api.patch_bytes(addr, "90 90 90 90")
+    check("patch_bytes", bool(patched.get("ok")) and patched.get("length") == 4, patched.get("patched"))
+    runs = api.list_patches()
+    mine = [r for r in runs.get("runs", []) if str(r.get("address", "")).lower() == addr.lower()]
+    check("list_patches_sees_it", bool(mine), {"count": runs.get("count"), "mine": len(mine)})
+    reverted = api.revert_patch(addr)
+    check("revert_patch", bool(reverted.get("ok")), reverted.get("reverted"))
+    check("revert_restores_bytes", api.get_hex_dump(addr, 16, 16) == before_dump, "byte-identical")
+
+    # Relocations are Ghidra's own edits and must not be reported as user patches.
+    check(
+        "patch_list_excludes_relocations",
+        api.list_patches().get("count", 0) == 0,
+        "clean after revert",
+    )
+
+    # Assembling: a dry run writes nothing and still reports whether the encoding fits.
+    dry = api.assemble_instruction(addr, "NOP", apply=False)
+    check(
+        "assemble_dry_run",
+        bool(dry.get("ok")) and dry.get("applied") is False and dry.get("length", 0) > 0,
+        {k: dry.get(k) for k in ("bytes", "length", "replaced_length", "overruns")},
+    )
+    check(
+        "assemble_rejects_nonsense",
+        api.assemble_instruction(addr, "DEFINITELY NOT AN INSTRUCTION").get("error")
+        == "assembly_failed",
+        "rejected",
+    )
+
+    # Export writes the imported file back out, patches and all.
+    import tempfile
+
+    out_path = str(Path(tempfile.gettempdir()) / "rawview_smoke_export.bin")
+    exported = api.export_patched_file(out_path)
+    check(
+        "export_patched_file",
+        bool(exported.get("ok")) and int(exported.get("bytes", 0)) > 0,
+        {"bytes": exported.get("bytes"), "source": exported.get("source")},
+    )
+    try:
+        Path(out_path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
     check("cancel_analysis_when_idle", api.cancel_analysis().get("ok") is False, "no analysis running")
     check("is_analysis_running", api.is_analysis_running() is False, False)
 

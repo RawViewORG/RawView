@@ -5,11 +5,14 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.Locale;
 
+import ghidra.app.cmd.disassemble.DisassembleCommand;
 import ghidra.app.cmd.function.ApplyFunctionSignatureCmd;
 import ghidra.app.cmd.function.FunctionRenameOption;
 import ghidra.app.decompiler.DecompileOptions;
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.plugin.assembler.Assembler;
+import ghidra.app.plugin.assembler.Assemblers;
 import ghidra.app.plugin.core.analysis.AutoAnalysisManager;
 import ghidra.app.util.cparser.C.CParser;
 import ghidra.app.util.parser.FunctionSignatureParser;
@@ -18,6 +21,8 @@ import ghidra.framework.cmd.BackgroundCommand;
 import ghidra.framework.model.DomainFile;
 import ghidra.framework.model.Project;
 import ghidra.framework.model.ProjectLocator;
+import ghidra.program.database.mem.AddressSourceInfo;
+import ghidra.program.database.mem.FileBytes;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.address.AddressIterator;
 import ghidra.program.model.block.BasicBlockModel;
@@ -41,10 +46,12 @@ import ghidra.program.model.listing.Program;
 import ghidra.program.model.listing.Variable;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
+import ghidra.program.model.mem.MemoryBlockSourceInfo;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.pcode.LocalSymbolMap;
+import ghidra.program.model.reloc.Relocation;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceIterator;
 import ghidra.program.model.symbol.ReferenceManager;
@@ -61,7 +68,9 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Set;
+import java.util.TreeMap;
 
 /**
  * Py4J entry-point object: import/analyze binaries and answer listing/decompiler queries.
@@ -1495,6 +1504,438 @@ public class GhidraBridge {
         return sb.toString();
     }
 
+
+    /** Longest patch accepted in one call, and the cap on how much of a file the patch scan reports. */
+    private static final int MAX_PATCH_BYTES = 4096;
+    private static final int MAX_PATCH_RUNS = 512;
+    /** Read/write granularity for the whole-file patch scan and export. */
+    private static final int PATCH_CHUNK = 1 << 16;
+
+    /**
+     * Overwrites the bytes at {@code addressText} with {@code hexBytes}.
+     *
+     * <p>Code units covering the range are cleared first: writing under a live instruction leaves the
+     * listing showing the old mnemonic over the new bytes. If the range held instructions, the range is
+     * re-disassembled afterwards, so the disassembly and decompiler panes show what was actually
+     * written rather than stale code.
+     *
+     * <p>The write goes through {@link Memory#setBytes}, which for a file-backed block records the
+     * change against the program's {@code FileBytes}. That is what makes {@link #listPatchesJson()} and
+     * {@link #exportPatchedFileJson(String)} work without RawView keeping its own patch ledger.
+     */
+    public synchronized String patchBytesJson(String addressText, String hexBytes) throws Exception {
+        ensureProgram();
+        Address addr = parseAddress(addressText);
+        if (addr == null) {
+            return "{\"error\":\"invalid_address\"}";
+        }
+        byte[] bytes;
+        try {
+            bytes = parseHexBytes(hexBytes);
+        } catch (IllegalArgumentException e) {
+            return "{\"error\":\"bad_bytes\",\"hint\":\"" + escapeJson(e.getMessage()) + "\"}";
+        }
+        if (bytes.length == 0) {
+            return "{\"error\":\"bad_bytes\",\"hint\":\"no bytes given\"}";
+        }
+        if (bytes.length > MAX_PATCH_BYTES) {
+            return "{\"error\":\"too_long\",\"hint\":\"at most " + MAX_PATCH_BYTES + " bytes per call\"}";
+        }
+        Memory mem = program.getMemory();
+        Address end;
+        try {
+            end = addr.add(bytes.length - 1L);
+        } catch (Exception e) {
+            return "{\"error\":\"out_of_range\",\"hint\":\"patch runs past the end of the address space\"}";
+        }
+        MemoryBlock block = mem.getBlock(addr);
+        if (block == null || mem.getBlock(end) != block) {
+            return "{\"error\":\"out_of_range\",\"hint\":\"patch must stay inside one memory block\"}";
+        }
+        if (!block.isInitialized()) {
+            return "{\"error\":\"uninitialized\",\"hint\":\"block " + escapeJson(block.getName())
+                    + " has no bytes to patch\"}";
+        }
+        byte[] before = new byte[bytes.length];
+        mem.getBytes(addr, before);
+        Listing listing = program.getListing();
+        boolean wasCode = listing.getInstructionContaining(addr) != null;
+        final Address endAddr = end;
+        return inTransaction("Patch bytes", () -> {
+            listing.clearCodeUnits(addr, endAddr, false);
+            mem.setBytes(addr, bytes);
+            boolean redisassembled = false;
+            if (wasCode) {
+                DisassembleCommand cmd = new DisassembleCommand(addr, null, true);
+                redisassembled = cmd.applyTo(program, TaskMonitor.DUMMY);
+            }
+            return "{\"ok\":true,\"address\":\"" + escapeJson(addr.toString())
+                    + "\",\"length\":" + bytes.length
+                    + ",\"original\":\"" + toHex(before) + "\""
+                    + ",\"patched\":\"" + toHex(bytes) + "\""
+                    + ",\"was_code\":" + wasCode
+                    + ",\"redisassembled\":" + redisassembled + "}";
+        });
+    }
+
+    /**
+     * Assembles one instruction for {@code addressText}, and writes it when {@code apply} is set.
+     *
+     * <p>With {@code apply} false this is a dry run: the caller gets the encoding and its length and can
+     * see, before touching the program, whether it fits. An instruction longer than the one it replaces
+     * runs into the following instruction, so the result always reports {@code replaced_length} and
+     * {@code overruns} rather than letting that happen silently.
+     */
+    public synchronized String assembleInstructionJson(String addressText, String instruction,
+            boolean apply) throws Exception {
+        ensureProgram();
+        Address addr = parseAddress(addressText);
+        if (addr == null) {
+            return "{\"error\":\"invalid_address\"}";
+        }
+        String text = instruction == null ? "" : instruction.trim();
+        if (text.isEmpty()) {
+            return "{\"error\":\"empty_instruction\"}";
+        }
+        Assembler asm;
+        try {
+            asm = Assemblers.getAssembler(program);
+        } catch (Exception e) {
+            return "{\"error\":\"no_assembler\",\"hint\":\"" + escapeJson(shortMessage(e))
+                    + "\",\"language\":\"" + escapeJson(program.getLanguageID().getIdAsString()) + "\"}";
+        }
+        byte[] bytes;
+        try {
+            bytes = asm.assembleLine(addr, text);
+        } catch (Exception e) {
+            return "{\"error\":\"assembly_failed\",\"hint\":\"" + escapeJson(shortMessage(e)) + "\"}";
+        }
+        Instruction existing = program.getListing().getInstructionContaining(addr);
+        int replaced = existing == null ? 0 : existing.getLength();
+        boolean overruns = replaced > 0 && bytes.length > replaced;
+        String head = "\"address\":\"" + escapeJson(addr.toString()) + "\",\"instruction\":\""
+                + escapeJson(text) + "\",\"bytes\":\"" + toHex(bytes) + "\",\"length\":" + bytes.length
+                + ",\"replaced_length\":" + replaced + ",\"overruns\":" + overruns;
+        if (!apply) {
+            return "{\"ok\":true,\"applied\":false," + head + "}";
+        }
+        byte[] before = new byte[bytes.length];
+        int read = readBytesBestEffort(program.getMemory(), addr, before);
+        final byte[] encoded = bytes;
+        return inTransaction("Assemble instruction", () -> {
+            asm.patchProgram(encoded, addr);
+            return "{\"ok\":true,\"applied\":true," + head + ",\"original\":\""
+                    + toHex(read == before.length ? before : new byte[0]) + "\"}";
+        });
+    }
+
+    /**
+     * Every byte in the program that a user changed, relative to the file it was imported from.
+     *
+     * <p>Derived from Ghidra's own original/modified {@code FileBytes} layers rather than from a ledger
+     * RawView maintains, so it stays correct across saves and reopens, and it also sees edits made
+     * outside this bridge.
+     *
+     * <p>Relocations are not patches. Ghidra applies them to memory at import time, which shows up in
+     * the modified layer exactly like a user edit would; the original bytes each relocation replaced are
+     * folded back in before diffing (the same correction {@code OriginalFileExporter} makes on the way
+     * out), so the list holds only what a person actually changed. Patches to memory with no backing
+     * file bytes (a {@code .bss}-style block) are invisible here, which is also why they cannot be
+     * exported.
+     */
+    public synchronized String listPatchesJson() throws Exception {
+        ensureProgram();
+        Memory mem = program.getMemory();
+        NavigableMap<Long, byte[]> relocs = relocationOverlay();
+        StringBuilder sb = new StringBuilder("{\"runs\":[");
+        boolean first = true;
+        int runs = 0;
+        boolean truncated = false;
+        for (FileBytes fb : mem.getAllFileBytes()) {
+            long size = fb.getSize();
+            byte[] orig = new byte[PATCH_CHUNK];
+            byte[] mod = new byte[PATCH_CHUNK];
+            long runStart = -1;
+            for (long pos = 0; pos < size && !truncated; pos += PATCH_CHUNK) {
+                int n = (int) Math.min(PATCH_CHUNK, size - pos);
+                fb.getOriginalBytes(pos, orig, 0, n);
+                fb.getModifiedBytes(pos, mod, 0, n);
+                applyRelocationOverlay(relocs, pos, mod, n);
+                for (int i = 0; i < n; i++) {
+                    boolean differs = orig[i] != mod[i];
+                    if (differs && runStart < 0) {
+                        runStart = pos + i;
+                    } else if (!differs && runStart >= 0) {
+                        if (!first) {
+                            sb.append(',');
+                        }
+                        first = false;
+                        appendPatchRun(sb, fb, relocs, runStart, pos + i - runStart);
+                        runStart = -1;
+                        if (++runs >= MAX_PATCH_RUNS) {
+                            truncated = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (runStart >= 0 && !truncated) {
+                if (!first) {
+                    sb.append(',');
+                }
+                first = false;
+                appendPatchRun(sb, fb, relocs, runStart, size - runStart);
+                runs++;
+            }
+        }
+        sb.append("],\"count\":").append(runs).append(",\"truncated\":").append(truncated).append('}');
+        return sb.toString();
+    }
+
+    /**
+     * File offset -> the bytes that were there before Ghidra applied a relocation at that offset.
+     *
+     * <p>Only relocations Ghidra actually applied and that are backed by file bytes appear; the rest
+     * changed nothing on the file side and need no correction.
+     */
+    private NavigableMap<Long, byte[]> relocationOverlay() {
+        TreeMap<Long, byte[]> out = new TreeMap<>();
+        Memory mem = program.getMemory();
+        Iterator<Relocation> it = program.getRelocationTable().getRelocations();
+        while (it != null && it.hasNext()) {
+            Relocation reloc = it.next();
+            if (reloc.getStatus() != Relocation.Status.APPLIED
+                    && reloc.getStatus() != Relocation.Status.APPLIED_OTHER) {
+                continue;
+            }
+            byte[] bytes = reloc.getBytes();
+            if (bytes == null || bytes.length == 0) {
+                continue;
+            }
+            Address addr = reloc.getAddress();
+            AddressSourceInfo info;
+            try {
+                info = mem.getAddressSourceInfo(addr);
+            } catch (Exception ignored) {
+                continue;
+            }
+            if (info == null) {
+                continue;
+            }
+            long offset = info.getFileOffset();
+            if (offset < 0) {
+                continue;
+            }
+            // A relocation can run past the end of its block; keep only the file-backed part.
+            MemoryBlockSourceInfo blockInfo = info.getMemoryBlockSourceInfo();
+            int len = bytes.length;
+            if (blockInfo != null) {
+                len = (int) Math.min(len, blockInfo.getMaxAddress().subtract(addr) + 1);
+            }
+            if (len <= 0) {
+                continue;
+            }
+            out.put(offset, len == bytes.length ? bytes : java.util.Arrays.copyOf(bytes, len));
+        }
+        return out;
+    }
+
+    /** Folds pre-relocation bytes back into {@code buf}, which holds {@code n} bytes from {@code pos}. */
+    private static void applyRelocationOverlay(NavigableMap<Long, byte[]> relocs, long pos, byte[] buf,
+            int n) {
+        if (relocs.isEmpty()) {
+            return;
+        }
+        Long from = relocs.floorKey(pos);
+        long start = from == null ? pos : from;
+        for (Map.Entry<Long, byte[]> e : relocs.subMap(start, true, pos + n, false).entrySet()) {
+            long off = e.getKey();
+            byte[] bytes = e.getValue();
+            for (int i = 0; i < bytes.length; i++) {
+                long at = off + i;
+                if (at >= pos && at < pos + n) {
+                    buf[(int) (at - pos)] = bytes[i];
+                }
+            }
+        }
+    }
+
+    /** One changed run: where it is in the file, where it is in memory, and both byte strings. */
+    private void appendPatchRun(StringBuilder sb, FileBytes fb, NavigableMap<Long, byte[]> relocs,
+            long offset, long length) throws IOException {
+        int n = (int) Math.min(length, MAX_PATCH_BYTES);
+        byte[] orig = new byte[n];
+        byte[] mod = new byte[n];
+        fb.getOriginalBytes(offset, orig, 0, n);
+        fb.getModifiedBytes(offset, mod, 0, n);
+        applyRelocationOverlay(relocs, offset, mod, n);
+        String address = "";
+        List<Address> addrs = program.getMemory().locateAddressesForFileBytesOffset(fb, offset);
+        if (addrs != null && !addrs.isEmpty()) {
+            address = addrs.get(0).toString();
+        }
+        sb.append("{\"address\":\"").append(escapeJson(address)).append('"')
+          .append(",\"file_offset\":").append(offset)
+          .append(",\"length\":").append(length)
+          .append(",\"original\":\"").append(toHex(orig)).append('"')
+          .append(",\"patched\":\"").append(toHex(mod)).append('"')
+          .append(",\"file\":\"").append(escapeJson(fb.getFilename())).append("\"}");
+    }
+
+    /**
+     * Puts the original file bytes back at {@code addressText}.
+     *
+     * <p>{@code length} of 0 means "the whole changed run that starts there", which is what the patch
+     * list hands back and what a user reverting a patch means.
+     *
+     * <p>What goes back is the file's own bytes. At an address Ghidra relocated at import time that is
+     * the pre-relocation value rather than the one memory held before the edit, so reverting there
+     * leaves the relocation undone in memory. Relocated addresses live in data and import tables, not
+     * in the code people patch, and the exported file is unaffected either way.
+     */
+    public synchronized String revertPatchJson(String addressText, int length) throws Exception {
+        ensureProgram();
+        Address addr = parseAddress(addressText);
+        if (addr == null) {
+            return "{\"error\":\"invalid_address\"}";
+        }
+        Memory mem = program.getMemory();
+        MemoryBlock block = mem.getBlock(addr);
+        if (block == null || !block.isInitialized()) {
+            return "{\"error\":\"uninitialized\"}";
+        }
+        MemoryBlockSourceInfo info = sourceInfoFor(block, addr);
+        if (info == null || info.getFileBytes().isEmpty()) {
+            return "{\"error\":\"no_file_bytes\",\"hint\":\"this block did not come from the imported file\"}";
+        }
+        FileBytes fb = info.getFileBytes().get();
+        long offset = info.getFileBytesOffset(addr);
+        int n = length > 0 ? Math.min(length, MAX_PATCH_BYTES) : runLengthAt(fb, offset);
+        if (n <= 0) {
+            return "{\"ok\":true,\"reverted\":0,\"address\":\"" + escapeJson(addr.toString()) + "\"}";
+        }
+        byte[] orig = new byte[n];
+        fb.getOriginalBytes(offset, orig, 0, n);
+        Listing listing = program.getListing();
+        boolean wasCode = listing.getInstructionContaining(addr) != null;
+        final Address endAddr = addr.add(n - 1L);
+        final int count = n;
+        return inTransaction("Revert patch", () -> {
+            listing.clearCodeUnits(addr, endAddr, false);
+            mem.setBytes(addr, orig);
+            if (wasCode) {
+                new DisassembleCommand(addr, null, true).applyTo(program, TaskMonitor.DUMMY);
+            }
+            return "{\"ok\":true,\"reverted\":" + count + ",\"address\":\""
+                    + escapeJson(addr.toString()) + "\",\"bytes\":\"" + toHex(orig) + "\"}";
+        });
+    }
+
+    /** How many bytes from {@code offset} the user changed, bounded by {@link #MAX_PATCH_BYTES}. */
+    private int runLengthAt(FileBytes fb, long offset) throws IOException {
+        NavigableMap<Long, byte[]> relocs = relocationOverlay();
+        byte[] one = new byte[1];
+        int n = 0;
+        while (n < MAX_PATCH_BYTES && offset + n < fb.getSize()) {
+            one[0] = fb.getModifiedByte(offset + n);
+            applyRelocationOverlay(relocs, offset + n, one, 1);
+            if (one[0] == fb.getOriginalByte(offset + n)) {
+                break;
+            }
+            n++;
+        }
+        return n;
+    }
+
+    private static MemoryBlockSourceInfo sourceInfoFor(MemoryBlock block, Address addr) {
+        for (MemoryBlockSourceInfo info : block.getSourceInfos()) {
+            if (info.contains(addr)) {
+                return info;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Writes the imported file back out with every patch applied, to {@code outPath}.
+     *
+     * <p>This is the original file image with the modified bytes overlaid, not a dump of memory: headers,
+     * relocations, alignment padding and any part of the file that was never mapped are preserved
+     * byte for byte, so the result still runs. A program with no file bytes behind it (a raw binary
+     * imported into a bare address space, say) cannot be exported this way and says so.
+     */
+    public synchronized String exportPatchedFileJson(String outPath) throws Exception {
+        ensureProgram();
+        String target = outPath == null ? "" : outPath.trim();
+        if (target.isEmpty()) {
+            return "{\"error\":\"no_output_path\"}";
+        }
+        List<FileBytes> all = program.getMemory().getAllFileBytes();
+        if (all.isEmpty()) {
+            return "{\"error\":\"no_file_bytes\",\"hint\":\"this program was not imported from a file image\"}";
+        }
+        FileBytes fb = all.get(0);
+        File out = new File(target);
+        File parent = out.getParentFile();
+        if (parent != null && !parent.isDirectory()) {
+            return "{\"error\":\"bad_output_path\",\"hint\":\"" + escapeJson(parent.getPath())
+                    + " is not a directory\"}";
+        }
+        long size = fb.getSize();
+        long written = 0;
+        // Relocations are Ghidra's doing, not the user's: writing them into the file would hand the
+        // loader bytes that have already been relocated once.
+        NavigableMap<Long, byte[]> relocs = relocationOverlay();
+        byte[] buf = new byte[PATCH_CHUNK];
+        try (java.io.OutputStream os = new java.io.BufferedOutputStream(
+                new java.io.FileOutputStream(out))) {
+            while (written < size) {
+                int n = (int) Math.min(PATCH_CHUNK, size - written);
+                fb.getModifiedBytes(written, buf, 0, n);
+                applyRelocationOverlay(relocs, written, buf, n);
+                os.write(buf, 0, n);
+                written += n;
+            }
+        }
+        return "{\"ok\":true,\"path\":\"" + escapeJson(out.getAbsolutePath()) + "\",\"bytes\":" + written
+                + ",\"source\":\"" + escapeJson(fb.getFilename()) + "\",\"file_bytes_count\":"
+                + all.size() + "}";
+    }
+
+    /** Strict hex parser: pairs of hex digits, with spaces, commas, "0x" prefixes and newlines allowed. */
+    private static byte[] parseHexBytes(String text) {
+        if (text == null) {
+            throw new IllegalArgumentException("no bytes given");
+        }
+        String cleaned = text.replace("0x", " ").replace("0X", " ")
+                .replaceAll("[\\s,]+", "");
+        if (cleaned.isEmpty()) {
+            return new byte[0];
+        }
+        if (cleaned.length() % 2 != 0) {
+            throw new IllegalArgumentException("hex needs an even number of digits");
+        }
+        byte[] out = new byte[cleaned.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            int hi = Character.digit(cleaned.charAt(i * 2), 16);
+            int lo = Character.digit(cleaned.charAt(i * 2 + 1), 16);
+            if (hi < 0 || lo < 0) {
+                throw new IllegalArgumentException(
+                        "not hex: " + cleaned.substring(i * 2, i * 2 + 2));
+            }
+            out[i] = (byte) ((hi << 4) | lo);
+        }
+        return out;
+    }
+
+    private static String toHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+            sb.append(Character.forDigit(b & 0xF, 16));
+        }
+        return sb.toString();
+    }
 
     /**
      * Renames a local or parameter of one function.
