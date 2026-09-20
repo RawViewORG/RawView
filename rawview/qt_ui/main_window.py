@@ -64,6 +64,7 @@ import qtawesome as qta
 from rawview.config import user_data_dir
 from rawview.qt_ui.cfg_panel import CfgPanel
 from rawview.qt_ui.callgraph_panel import CallGraphPanel
+from rawview.qt_ui.patches_panel import PatchesPanel
 from rawview.qt_ui.controller import RawViewQtController
 from rawview.qt_ui.hex_view import HexViewPanel
 from rawview.qt_ui.highlighter import PseudocodeHighlighter
@@ -420,6 +421,7 @@ class MainWindow(QMainWindow):
 
         self._cfg = CfgPanel()
         self._callgraph = CallGraphPanel()
+        self._patches = PatchesPanel(mono)
 
         tabs = QTabWidget()
         tabs.addTab(self._decompiler, "Decompiler")
@@ -432,6 +434,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._xrefs_table, "Xrefs (to addr)")
         tabs.addTab(self._cfg, "CFG")
         tabs.addTab(self._callgraph, "Call graph")
+        tabs.addTab(self._patches, "Patches")
         tabs.setTabsClosable(False)
         tabs.setDocumentMode(True)
         tabs.setMovable(True)
@@ -930,6 +933,17 @@ class MainWindow(QMainWindow):
         self._act_load_re.triggered.connect(self._load_re_session)
         m_file.addAction(self._act_load_re)
         m_file.addSeparator()
+        self._act_patch = QAction("Patch bytes at address...", self)
+        self._act_patch.setToolTip("Write raw bytes, or assemble one instruction, at an address.")
+        self._act_patch.triggered.connect(self._open_patch_dialog)
+        m_file.addAction(self._act_patch)
+        self._act_export_patched = QAction("Export patched binary...", self)
+        self._act_export_patched.setToolTip(
+            "Write the imported file back out with every patch applied."
+        )
+        self._act_export_patched.triggered.connect(self._export_patched_binary)
+        m_file.addAction(self._act_export_patched)
+        m_file.addSeparator()
         self._act_settings = QAction("Settings...", self)
         self._act_settings.triggered.connect(self._open_settings)
         m_file.addAction(self._act_settings)
@@ -964,6 +978,7 @@ class MainWindow(QMainWindow):
             ("Xrefs (to addr)", self._xrefs_table),
             ("CFG", self._cfg),
             ("Call graph", self._callgraph),
+            ("Patches", self._patches),
         ]
         for title, w in tab_targets:
             act = QAction(title, self)
@@ -1129,6 +1144,13 @@ class MainWindow(QMainWindow):
         c.call_graph_level.connect(self._callgraph.apply_level)
         self._callgraph.navigate_requested.connect(self._ctrl.navigate_to_address)
         self._callgraph.expand_requested.connect(self._ctrl.fetch_call_graph_level)
+        c.patches_updated.connect(self._patches.load)
+        c.patch_applied.connect(self._on_patch_applied)
+        c.patch_export_finished.connect(self._on_patch_export_finished)
+        self._patches.navigate_requested.connect(self._ctrl.navigate_to_address)
+        self._patches.refresh_requested.connect(self._ctrl.refresh_patches)
+        self._patches.revert_requested.connect(self._on_revert_patch)
+        self._patches.export_requested.connect(self._export_patched_binary)
 
     def _restore_all_panels(self) -> None:
         """Re-show dock widgets after the user closes them from the title bar."""
@@ -1143,6 +1165,8 @@ class MainWindow(QMainWindow):
             self._ctrl.refresh_control_flow_graph()
         if w is self._callgraph:
             self._refresh_call_graph_root()
+        if w is self._patches:
+            self._ctrl.refresh_patches()
         if w is self._hex_panel:
             self._hex_panel.refresh_if_visible()
 
@@ -1408,6 +1432,60 @@ class MainWindow(QMainWindow):
         self._ctrl.refresh_control_flow_graph()
         if self._tabs.currentWidget() is self._callgraph:
             self._refresh_call_graph_root()
+
+    def _open_patch_dialog(self, _checked: bool = False, address: str = "") -> None:
+        if not self._program_loaded:
+            self.statusBar().showMessage("Load a binary before patching.", 5000)
+            return
+        from rawview.qt_ui.patch_dialog import open_patch_dialog
+
+        target = (address or self._addr_edit.text()).strip()
+        open_patch_dialog(self, self._ctrl, target, self._mono())
+
+    def _on_patch_applied(self, result: dict) -> None:
+        if result.get("ok"):
+            what = result.get("instruction") or result.get("patched") or ""
+            if result.get("reverted"):
+                msg = f"Reverted {result['reverted']} byte(s) at {result.get('address', '')}."
+            else:
+                msg = f"Patched {result.get('address', '')}: {what}"
+            self.statusBar().showMessage(msg, 6000)
+        elif result.get("error"):
+            hint = result.get("hint") or ""
+            self.statusBar().showMessage(
+                f"Patch failed: {result['error']}{' - ' + hint if hint else ''}", 8000
+            )
+
+    def _on_revert_patch(self, address: str, length: int) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Revert patch?",
+            f"Put the original file bytes back at {address}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._ctrl.revert_patch(address, length)
+
+    def _export_patched_binary(self) -> None:
+        if not self._program_loaded:
+            self.statusBar().showMessage("Load a binary first.", 5000)
+            return
+        path, _ = QFileDialog.getSaveFileName(self, "Export patched binary", "", "All files (*)")
+        if path:
+            self._ctrl.export_patched_file(path)
+
+    def _on_patch_export_finished(self, result: dict) -> None:
+        if result.get("ok"):
+            self.statusBar().showMessage(
+                f"Wrote {result.get('bytes', 0)} bytes to {result.get('path', '')}", 10000
+            )
+        else:
+            hint = result.get("hint") or ""
+            self._toast_error(
+                f"Could not export the patched binary: {result.get('error', 'failed')}"
+                f"{chr(10) + hint if hint else ''}"
+            )
 
     def _refresh_call_graph_root(self) -> None:
         """Re-root the call graph pane on the current address; it names the function itself."""

@@ -140,6 +140,14 @@ class HexViewPanel(QWidget):
         self._btn_copy_hex.clicked.connect(self._copy_hex_only)
         row.addWidget(self._btn_copy_hex)
 
+        self._btn_patch = QPushButton("Patch...")
+        self._btn_patch.setAutoDefault(False)
+        self._btn_patch.setToolTip(
+            "Write bytes, or assemble an instruction, at the address of the line the cursor is on."
+        )
+        self._btn_patch.clicked.connect(self._open_patch)
+        row.addWidget(self._btn_patch)
+
         self._edit = QPlainTextEdit()
         self._edit.setReadOnly(True)
         self._edit.setFont(mono_font)
@@ -156,6 +164,21 @@ class HexViewPanel(QWidget):
         self._ctrl.hex_dump_text.connect(self._on_dump_text)
         self._ctrl.current_address_changed.connect(self._on_listing_address)
         self._ctrl.set_hex_view_options(self._size_bytes(), self._cols_value())
+
+    def address_at_cursor(self) -> str:
+        """Address of the dump row the cursor sits on, falling back to the toolbar address."""
+        cursor = self._edit.textCursor()
+        line = cursor.block().text()
+        if line and not line.startswith("#") and "\t" in line:
+            head = line.split("\t", 1)[0].strip()
+            if head:
+                return head
+        return self._addr.text().strip() or self._ctrl.current_address
+
+    def _open_patch(self) -> None:
+        from rawview.qt_ui.patch_dialog import open_patch_dialog
+
+        open_patch_dialog(self, self._ctrl, self.address_at_cursor(), self._edit.font())
 
     def _on_follow_toggled(self, on: bool) -> None:
         if on:

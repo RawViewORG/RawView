@@ -78,6 +78,9 @@ class RawViewQtController(QObject):
     ghidra_task_failed = Signal(str)
     cfg_graph_updated = Signal(object)  # dict from get_control_flow_graph
     call_graph_level = Signal(object)  # dict from get_call_graph plus the panel's "token"
+    patches_updated = Signal(object)  # dict from list_patches
+    patch_applied = Signal(object)  # dict result of a patch, assemble or revert
+    patch_export_finished = Signal(object)  # dict from export_patched_file
     bridge_prewarm_finished = Signal(bool, str)  # ok, message (NO_GHIDRA / BAD_GHIDRA / ...)
     session_restore_hints = Signal(object)  # dict: hex_dump_size, hex_dump_bpl (optional current_address)
     analysis_batch_changed = Signal(object)  # dict: paths, next_index, count, loaded_program
@@ -854,6 +857,106 @@ class RawViewQtController(QObject):
                 )
 
         threading.Thread(target=work, name="rawview-callgraph", daemon=True).start()
+
+    # -- patching ---------------------------------------------------------------------
+    #
+    # The write calls run on the calling thread and return their result, rather than going
+    # through a worker and a signal like analysis does. They are single memory writes: the dialog
+    # that issues one needs the answer to show it, and making the user wait on a round trip they
+    # cannot see would be worse than the millisecond it costs. Scanning for patches and writing
+    # the exported file are the slow ones, and those are threaded.
+
+    def hex_dump_at(self, address: str, length: int = 16) -> str:
+        """The bytes at ``address`` as one spaced hex string, for a dialog to show before writing."""
+        if self._api is None:
+            return ""
+        try:
+            dump = self._api.get_hex_dump(address, int(length), int(length))
+        except Exception:
+            logger.debug("hex_dump_at", exc_info=True)
+            return ""
+        for line in dump.splitlines():
+            if line.startswith("#") or "\t" not in line:
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                return parts[1].strip()
+        return ""
+
+    def assemble_preview(self, address: str, instruction: str) -> dict[str, Any]:
+        """Assemble without writing, so a dialog can show the encoding and whether it fits."""
+        if self._api is None:
+            return {"error": "no_program"}
+        try:
+            return self._api.assemble_instruction(address, instruction, apply=False)
+        except Exception as e:
+            logger.exception("assemble preview")
+            return {"error": "bridge_error", "hint": str(e)[:300]}
+
+    def apply_patch_bytes(self, address: str, hex_bytes: str) -> dict[str, Any]:
+        return self._after_patch(self._call_patch("patch", address, hex_bytes))
+
+    def apply_assembled_instruction(self, address: str, instruction: str) -> dict[str, Any]:
+        return self._after_patch(self._call_patch("assemble", address, instruction))
+
+    def revert_patch(self, address: str, length: int = 0) -> dict[str, Any]:
+        return self._after_patch(self._call_patch("revert", address, length))
+
+    def _call_patch(self, kind: str, address: str, arg: Any) -> dict[str, Any]:
+        if self._api is None:
+            return {"error": "no_program"}
+        try:
+            if kind == "patch":
+                return self._api.patch_bytes(address, str(arg))
+            if kind == "assemble":
+                return self._api.assemble_instruction(address, str(arg), apply=True)
+            return self._api.revert_patch(address, int(arg))
+        except Exception as e:
+            logger.exception("%s", kind)
+            return {"error": "bridge_error", "hint": str(e)[:300]}
+
+    def _after_patch(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Tell the UI what happened and re-read the views that are now showing stale bytes."""
+        self.patch_applied.emit(result)
+        if result.get("ok"):
+            self.refresh_hex_view()
+            if self._current_address:
+                self._refresh_views_for_address(self._current_address)
+            self.refresh_patches()
+        return result
+
+    def refresh_patches(self) -> None:
+        """Ask for every byte that differs from the imported file. Scans the file, so off-thread."""
+        if self._api is None:
+            self.patches_updated.emit({"runs": [], "count": 0})
+            return
+
+        def work() -> None:
+            try:
+                assert self._api is not None
+                self.patches_updated.emit(self._api.list_patches())
+            except Exception as e:
+                logger.exception("list patches")
+                self.patches_updated.emit({"runs": [], "count": 0, "error": str(e)[:300]})
+
+        threading.Thread(target=work, name="rawview-patches", daemon=True).start()
+
+    def export_patched_file(self, out_path: str) -> None:
+        """Write the imported file back out with the patches applied."""
+        if self._api is None:
+            self.patch_export_finished.emit({"error": "no_program"})
+            return
+
+        def work() -> None:
+            try:
+                assert self._api is not None
+                self.status_message.emit(f"Writing patched binary to {out_path}...")
+                self.patch_export_finished.emit(self._api.export_patched_file(out_path))
+            except Exception as e:
+                logger.exception("export patched file")
+                self.patch_export_finished.emit({"error": "bridge_error", "hint": str(e)[:300]})
+
+        threading.Thread(target=work, name="rawview-export-patched", daemon=True).start()
 
     def apply_comment(self, address: str, text: str) -> None:
         if self._api is None:
