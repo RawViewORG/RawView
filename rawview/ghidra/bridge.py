@@ -310,6 +310,8 @@ class GhidraBridgeController:
     _java_call_lock: threading.RLock = field(default_factory=threading.RLock, init=False)
     _last_error: str | None = field(default=None, init=False)
     _active_py4j_port: int = field(default=0, init=False)
+    # Signals the thread that owns the JVM process to let go; see _spawn_owned().
+    _owner_release: threading.Event = field(default_factory=threading.Event, init=False)
 
     @property
     def state(self) -> BridgeState:
@@ -489,6 +491,8 @@ class GhidraBridgeController:
             self._java_call_lock.release()
 
         self._terminate_subprocess()
+        # Let the owner thread go now that nothing is left to keep alive for.
+        self._owner_release.set()
 
     def _java_command(self, java_args: list[str]) -> tuple[list[str], Path | None]:
         """Build ``[java, …]``, using a ``@argfile`` on Windows when the command line would be too long."""
@@ -584,15 +588,7 @@ class GhidraBridgeController:
         ]
         cmd, argfile_path = self._java_command(java_args)
         logger.info("Starting Ghidra JVM: %s", " ".join(cmd[:3]) + " ...")
-        self._proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
+        self._proc = self._spawn_owned(cmd)
         assert self._proc.stdout is not None
         deadline = time.monotonic() + self.startup_timeout_s
         ready = False
@@ -648,6 +644,47 @@ class GhidraBridgeController:
         if pong != "pong":
             raise RuntimeError(f"Unexpected ping response: {pong!r}")
         self._start_jvm_stdout_drain()
+
+    def _spawn_owned(self, cmd: list[str]) -> subprocess.Popen[str]:
+        """
+        Start the JVM from a thread that stays alive as long as the JVM should.
+
+        The sandbox passes bubblewrap ``--die-with-parent``, which is ``PR_SET_PDEATHSIG``, and
+        Linux delivers that signal when the parent **thread** exits, not when the parent process
+        does. RawView starts the bridge from short-lived workers - the boot prewarm, opening a
+        binary, an agent tool - so spawning inline killed the JVM seconds after it booted, as soon
+        as the worker returned. The owner thread parks until shutdown, and because it is a daemon
+        thread it dies with the process, which is when ``--die-with-parent`` should fire.
+        """
+        self._owner_release.clear()
+        spawned: dict[str, Any] = {}
+        started = threading.Event()
+
+        def own() -> None:
+            try:
+                spawned["proc"] = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                )
+            except BaseException as e:  # noqa: BLE001 - reported to the caller below
+                spawned["error"] = e
+            finally:
+                started.set()
+            # Hold the thread open for the JVM's lifetime so its pdeathsig parent stays alive.
+            self._owner_release.wait()
+
+        threading.Thread(target=own, name="rawview-jvm-owner", daemon=True).start()
+        started.wait()
+        err = spawned.get("error")
+        if err is not None:
+            self._owner_release.set()
+            raise err
+        return spawned["proc"]
 
     def _start_jvm_stdout_drain(self) -> None:
         """Read the JVM's stdout forever; Ghidra logs to stdout and an unread PIPE deadlocks the process."""
