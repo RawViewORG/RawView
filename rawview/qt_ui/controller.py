@@ -77,6 +77,7 @@ class RawViewQtController(QObject):
     agent_event = Signal(str, object)  # kind, dict (includes tool-driven "ghidra_shell_refresh")
     ghidra_task_failed = Signal(str)
     cfg_graph_updated = Signal(object)  # dict from get_control_flow_graph
+    call_graph_level = Signal(object)  # dict from get_call_graph plus the panel's "token"
     bridge_prewarm_finished = Signal(bool, str)  # ok, message (NO_GHIDRA / BAD_GHIDRA / ...)
     session_restore_hints = Signal(object)  # dict: hex_dump_size, hex_dump_bpl (optional current_address)
     analysis_batch_changed = Signal(object)  # dict: paths, next_index, count, loaded_program
@@ -824,6 +825,35 @@ class RawViewQtController(QObject):
                 self.ghidra_task_failed.emit(str(e))
 
         threading.Thread(target=work, name="rawview-cfg", daemon=True).start()
+
+    def fetch_call_graph_level(self, address: str, direction: str, token: str) -> None:
+        """
+        Fetch one level of the call graph around ``address`` for the call graph panel.
+
+        The panel expands lazily, so this is a depth-1 query per opened node rather than one
+        walk of the whole graph. ``token`` is echoed back untouched: several expands can be in
+        flight at once and the panel has to know which item each answer belongs to.
+        """
+        if self._api is None:
+            self.call_graph_level.emit(
+                {"token": token, "direction": direction, "error": "no program loaded"}
+            )
+            return
+
+        def work() -> None:
+            try:
+                assert self._api is not None
+                data = self._api.get_call_graph(address, depth=1, direction=direction)
+                data["token"] = token
+                data.setdefault("direction", direction)
+                self.call_graph_level.emit(data)
+            except Exception as e:
+                logger.exception("call graph")
+                self.call_graph_level.emit(
+                    {"token": token, "direction": direction, "error": str(e)}
+                )
+
+        threading.Thread(target=work, name="rawview-callgraph", daemon=True).start()
 
     def apply_comment(self, address: str, text: str) -> None:
         if self._api is None:

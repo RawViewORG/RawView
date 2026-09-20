@@ -318,6 +318,27 @@ class GhidraAPI:
         raw = str(self.bridge.invoke_java(lambda ep: ep.getControlFlowGraphJson(address)))
         return json.loads(raw)
 
+    def get_call_graph(
+        self, address: str, *, depth: int = 2, direction: str = "both"
+    ) -> dict[str, Any]:
+        """
+        Call graph around ``address``: ``{root, nodes, edges, truncated}``.
+
+        ``direction`` is ``callers``, ``callees`` or ``both``. Edges always point caller -> callee.
+        """
+        depth_i = max(1, min(int(depth), 5))
+        raw = str(
+            self.bridge.invoke_java(lambda ep: ep.getCallGraphJson(address, depth_i, direction))
+        )
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {"nodes": [], "edges": []}
+
+    def get_function_at(self, address: str) -> dict[str, Any]:
+        """The function at or containing ``address``, or ``{"error": "no_function"}``."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.getFunctionAtJson(address)))
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {"error": "no_function"}
+
     def rename_variable(self, function_address: str, old_name: str, new_name: str) -> dict[str, Any]:
         raw = str(
             self.bridge.invoke_java(

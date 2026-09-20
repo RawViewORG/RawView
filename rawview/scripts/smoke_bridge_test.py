@@ -114,6 +114,37 @@ def _check_engine(api: "GhidraAPI") -> list[str]:  # noqa: F821
     search = api.search_bytes("48 89 ??", max_matches=8)
     check("search_wildcards", "matches" in search, {k: search.get(k) for k in ("count", "wildcards")})
 
+    # Call graph: depth 1 in one direction must only produce edges that touch the root.
+    graph = api.get_call_graph(addr, depth=1, direction="callers")
+    root = str(graph.get("root", ""))
+    edges = graph.get("edges") or []
+    check(
+        "call_graph_callers",
+        "error" not in graph and all(str(e.get("to")) == root for e in edges),
+        {"nodes": len(graph.get("nodes") or []), "edges": len(edges)},
+    )
+    graph_out = api.get_call_graph(addr, depth=2, direction="both")
+    check(
+        "call_graph_both",
+        len(graph_out.get("nodes") or []) >= len(graph.get("nodes") or []),
+        {"nodes": len(graph_out.get("nodes") or []), "truncated": graph_out.get("truncated")},
+    )
+    check(
+        "call_graph_bad_direction",
+        api.get_call_graph(addr, depth=1, direction="sideways").get("error") == "bad_direction",
+        "rejected",
+    )
+
+    # An address inside a body resolves to the function that contains it, not to nothing.
+    fn_at = api.get_function_at(addr)
+    inside = api.get_function_at(hex(int(addr, 16) + 1))
+    check("function_at_entry", fn_at.get("address", "").lower() == addr.lower(), fn_at.get("name"))
+    check(
+        "function_at_inside_body",
+        int(fn_at.get("size", 0)) < 2 or inside.get("address") == fn_at.get("address"),
+        inside.get("name"),
+    )
+
     sig = api.set_function_signature(addr, "int rawview_smoke(char *buf, unsigned long len)")
     check("set_function_signature", bool(sig.get("ok")), sig)
 

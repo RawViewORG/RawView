@@ -63,6 +63,7 @@ import qtawesome as qta
 
 from rawview.config import user_data_dir
 from rawview.qt_ui.cfg_panel import CfgPanel
+from rawview.qt_ui.callgraph_panel import CallGraphPanel
 from rawview.qt_ui.controller import RawViewQtController
 from rawview.qt_ui.hex_view import HexViewPanel
 from rawview.qt_ui.highlighter import PseudocodeHighlighter
@@ -418,6 +419,7 @@ class MainWindow(QMainWindow):
         )
 
         self._cfg = CfgPanel()
+        self._callgraph = CallGraphPanel()
 
         tabs = QTabWidget()
         tabs.addTab(self._decompiler, "Decompiler")
@@ -429,6 +431,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._symbols_table, "Symbols")
         tabs.addTab(self._xrefs_table, "Xrefs (to addr)")
         tabs.addTab(self._cfg, "CFG")
+        tabs.addTab(self._callgraph, "Call graph")
         tabs.setTabsClosable(False)
         tabs.setDocumentMode(True)
         tabs.setMovable(True)
@@ -960,6 +963,7 @@ class MainWindow(QMainWindow):
             ("Symbols", self._symbols_table),
             ("Xrefs (to addr)", self._xrefs_table),
             ("CFG", self._cfg),
+            ("Call graph", self._callgraph),
         ]
         for title, w in tab_targets:
             act = QAction(title, self)
@@ -1122,6 +1126,9 @@ class MainWindow(QMainWindow):
         c.session_restore_hints.connect(self._apply_re_session_ui_hints)
         c.cfg_graph_updated.connect(self._cfg.load_cfg_json)
         self._cfg.navigate_requested.connect(self._ctrl.navigate_to_address)
+        c.call_graph_level.connect(self._callgraph.apply_level)
+        self._callgraph.navigate_requested.connect(self._ctrl.navigate_to_address)
+        self._callgraph.expand_requested.connect(self._ctrl.fetch_call_graph_level)
 
     def _restore_all_panels(self) -> None:
         """Re-show dock widgets after the user closes them from the title bar."""
@@ -1134,6 +1141,8 @@ class MainWindow(QMainWindow):
         w = self._tabs.widget(index)
         if w is self._cfg:
             self._ctrl.refresh_control_flow_graph()
+        if w is self._callgraph:
+            self._refresh_call_graph_root()
         if w is self._hex_panel:
             self._hex_panel.refresh_if_visible()
 
@@ -1397,6 +1406,12 @@ class MainWindow(QMainWindow):
                 self._nav_pos = len(self._nav_history) - 1
         self._update_nav_buttons()
         self._ctrl.refresh_control_flow_graph()
+        if self._tabs.currentWidget() is self._callgraph:
+            self._refresh_call_graph_root()
+
+    def _refresh_call_graph_root(self) -> None:
+        """Re-root the call graph pane on the current address; it names the function itself."""
+        self._callgraph.set_root(self._addr_edit.text().strip())
 
     def _nav_back(self) -> None:
         if self._nav_pos > 0:

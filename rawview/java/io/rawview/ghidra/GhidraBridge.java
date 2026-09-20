@@ -1312,6 +1312,190 @@ public class GhidraBridge {
         return sb.toString();
     }
 
+    /** Node budget for one call-graph walk; a graph past this is truncated rather than unbounded. */
+    private static final int MAX_CALLGRAPH_NODES = 400;
+    /** Level budget for one call-graph walk. */
+    private static final int MAX_CALLGRAPH_DEPTH = 5;
+
+    /**
+     * Call graph around {@code addressText}: who calls this function, what it calls, or both, walked
+     * {@code depth} levels out from it.
+     *
+     * <p>{@code direction} is {@code callers}, {@code callees} or {@code both} (the default when empty).
+     * Edges always point caller -> callee whichever way the walk travelled, so the client can lay the
+     * graph out without re-deriving direction. Nodes past {@link #MAX_CALLGRAPH_NODES} are dropped and
+     * {@code truncated} is set: a call graph on a statically linked binary is easily tens of thousands of
+     * nodes, and a pane that quietly drew a tenth of one would be worse than one that says so. Edges are
+     * recorded as each level is expanded, so two leaves at the outermost level may call each other
+     * without an edge to show for it.
+     */
+    public synchronized String getCallGraphJson(String addressText, int depth, String direction)
+            throws Exception {
+        ensureProgram();
+        Function root = resolveFunction(addressText);
+        if (root == null) {
+            return "{\"error\":\"no_function\",\"nodes\":[],\"edges\":[]}";
+        }
+        String dir = direction == null ? "" : direction.trim().toLowerCase(Locale.ROOT);
+        boolean wantCallers = dir.isEmpty() || "both".equals(dir) || "callers".equals(dir);
+        boolean wantCallees = dir.isEmpty() || "both".equals(dir) || "callees".equals(dir);
+        if (!wantCallers && !wantCallees) {
+            return "{\"error\":\"bad_direction\",\"hint\":\"direction is callers, callees or both\","
+                    + "\"nodes\":[],\"edges\":[]}";
+        }
+        int levels = Math.max(1, Math.min(depth <= 0 ? 2 : depth, MAX_CALLGRAPH_DEPTH));
+
+        Map<String, Function> nodes = new LinkedHashMap<>();
+        Map<String, Integer> levelOf = new LinkedHashMap<>();
+        Set<String> edgeKeys = new HashSet<>();
+        List<String> edges = new ArrayList<>();
+        String rootId = root.getEntryPoint().toString();
+        nodes.put(rootId, root);
+        levelOf.put(rootId, 0);
+
+        List<Function> frontier = new ArrayList<>();
+        frontier.add(root);
+        boolean truncated = false;
+        for (int level = 0; level < levels && !frontier.isEmpty() && !truncated; level++) {
+            List<Function> next = new ArrayList<>();
+            for (Function f : frontier) {
+                if (wantCallers) {
+                    for (Function caller : f.getCallingFunctions(TaskMonitor.DUMMY)) {
+                        if (!registerCallNode(nodes, levelOf, next, caller, level + 1)) {
+                            truncated = true;
+                            break;
+                        }
+                        registerCallEdge(edgeKeys, edges, caller, f);
+                    }
+                }
+                if (!truncated && wantCallees) {
+                    for (Function callee : f.getCalledFunctions(TaskMonitor.DUMMY)) {
+                        if (!registerCallNode(nodes, levelOf, next, callee, level + 1)) {
+                            truncated = true;
+                            break;
+                        }
+                        registerCallEdge(edgeKeys, edges, f, callee);
+                    }
+                }
+                if (truncated) {
+                    break;
+                }
+            }
+            frontier = next;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"root\":\"").append(escapeJson(rootId))
+          .append("\",\"root_name\":\"").append(escapeJson(root.getName()))
+          .append("\",\"depth\":").append(levels)
+          .append(",\"direction\":\"")
+          .append(wantCallers && wantCallees ? "both" : wantCallers ? "callers" : "callees")
+          .append("\",\"truncated\":").append(truncated)
+          .append(",\"nodes\":[");
+        boolean firstNode = true;
+        for (Map.Entry<String, Function> entry : nodes.entrySet()) {
+            Function f = entry.getValue();
+            if (!firstNode) {
+                sb.append(',');
+            }
+            firstNode = false;
+            sb.append("{\"address\":\"").append(escapeJson(entry.getKey())).append('"')
+              .append(",\"name\":\"").append(escapeJson(f.getName())).append('"')
+              .append(",\"namespace\":\"").append(escapeJson(namespaceName(f))).append('"')
+              .append(",\"level\":").append(levelOf.getOrDefault(entry.getKey(), 0))
+              .append(",\"size\":").append(f.getBody() == null ? 0L : f.getBody().getNumAddresses())
+              .append(",\"external\":").append(f.isExternal())
+              .append(",\"thunk\":").append(f.isThunk())
+              .append('}');
+        }
+        sb.append("],\"edges\":[");
+        for (int i = 0; i < edges.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(edges.get(i));
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    /** Adds {@code f} to the walk if it is new; false when the node budget is spent. */
+    private static boolean registerCallNode(Map<String, Function> nodes, Map<String, Integer> levelOf,
+            List<Function> next, Function f, int level) {
+        if (f == null || f.getEntryPoint() == null) {
+            return true;
+        }
+        String id = f.getEntryPoint().toString();
+        if (nodes.containsKey(id)) {
+            return true;
+        }
+        if (nodes.size() >= MAX_CALLGRAPH_NODES) {
+            return false;
+        }
+        nodes.put(id, f);
+        levelOf.put(id, level);
+        // External and thunk functions are listed but never expanded: there is nothing behind them.
+        if (!f.isExternal()) {
+            next.add(f);
+        }
+        return true;
+    }
+
+    private static void registerCallEdge(Set<String> edgeKeys, List<String> edges, Function caller,
+            Function callee) {
+        if (caller == null || callee == null) {
+            return;
+        }
+        String from = caller.getEntryPoint().toString();
+        String to = callee.getEntryPoint().toString();
+        if (!edgeKeys.add(from + "->" + to)) {
+            return;
+        }
+        edges.add("{\"from\":\"" + escapeJson(from) + "\",\"to\":\"" + escapeJson(to) + "\"}");
+    }
+
+    private static String namespaceName(Function f) {
+        try {
+            return f.getParentNamespace() == null ? "" : f.getParentNamespace().getName();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    /**
+     * The function at or containing {@code addressText}, as {@code {address,name,signature,...}}.
+     *
+     * <p>Answers "what am I looking at" for an address that is not an entry point, which is most of the
+     * addresses a user or the agent actually holds.
+     */
+    public synchronized String getFunctionAtJson(String addressText) throws Exception {
+        ensureProgram();
+        Function f = resolveFunction(addressText);
+        if (f == null) {
+            return "{\"error\":\"no_function\"}";
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"address\":\"").append(escapeJson(f.getEntryPoint().toString())).append('"')
+          .append(",\"name\":\"").append(escapeJson(f.getName())).append('"')
+          .append(",\"namespace\":\"").append(escapeJson(namespaceName(f))).append('"')
+          .append(",\"signature\":\"")
+          .append(escapeJson(f.getSignature() == null ? "" : f.getSignature().getPrototypeString()))
+          .append('"')
+          .append(",\"calling_convention\":\"")
+          .append(escapeJson(f.getCallingConventionName() == null ? "" : f.getCallingConventionName()))
+          .append('"');
+        if (f.getBody() != null) {
+            sb.append(",\"min\":\"").append(escapeJson(f.getBody().getMinAddress().toString())).append('"')
+              .append(",\"max\":\"").append(escapeJson(f.getBody().getMaxAddress().toString())).append('"')
+              .append(",\"size\":").append(f.getBody().getNumAddresses());
+        }
+        sb.append(",\"external\":").append(f.isExternal())
+          .append(",\"thunk\":").append(f.isThunk())
+          .append('}');
+        return sb.toString();
+    }
+
+
     /**
      * Renames a local or parameter of one function.
      *
