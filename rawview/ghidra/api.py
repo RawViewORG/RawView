@@ -357,6 +357,32 @@ class GhidraAPI:
         raw = str(self.bridge.invoke_java(lambda ep: ep.setFunctionSignature(address, signature)))
         return json.loads(raw)
 
+    def open_comparison_file(self, path: str) -> dict[str, Any]:
+        """Import a second binary alongside the loaded one, for diffing."""
+        usable = self.bridge.stage_path_for_jvm(path)
+        raw = str(self.bridge.invoke_java(lambda ep: ep.openComparisonFile(usable)))
+        return json.loads(raw)
+
+    def analyze_comparison_program(self) -> dict[str, Any]:
+        """Run auto-analysis on the comparison program so its functions are comparable."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.analyzeComparisonProgram()))
+        return json.loads(raw)
+
+    def close_comparison_program(self) -> dict[str, Any]:
+        raw = str(self.bridge.invoke_java(lambda ep: ep.closeComparisonProgram()))
+        return json.loads(raw)
+
+    def diff_programs(self, limit: int = 200) -> dict[str, Any]:
+        """
+        Compare the loaded program with the comparison one.
+
+        Returns ``{a, b, identical, changed, only_in_a, only_in_b, truncated}``. Functions are
+        matched by name, or by a hash of their mnemonic sequence when the name is one Ghidra made
+        up, so a rebased or recompiled binary does not report every function as changed.
+        """
+        raw = str(self.bridge.invoke_java(lambda ep: ep.diffProgramsJson(int(limit))))
+        return json.loads(raw)
+
     def search_program(
         self, query: str, *, limit_per_kind: int = 50, kinds: str = ""
     ) -> dict[str, Any]:

@@ -66,6 +66,7 @@ from rawview.qt_ui.cfg_panel import CfgPanel
 from rawview.qt_ui.callgraph_panel import CallGraphPanel
 from rawview.qt_ui.patches_panel import PatchesPanel
 from rawview.qt_ui.search_panel import SearchPanel
+from rawview.qt_ui.diff_panel import DiffPanel
 from rawview.qt_ui.controller import RawViewQtController
 from rawview.qt_ui.hex_view import HexViewPanel
 from rawview.qt_ui.highlighter import PseudocodeHighlighter
@@ -424,6 +425,7 @@ class MainWindow(QMainWindow):
         self._callgraph = CallGraphPanel()
         self._patches = PatchesPanel(mono)
         self._search = SearchPanel(mono)
+        self._diff = DiffPanel(mono)
 
         tabs = QTabWidget()
         tabs.addTab(self._decompiler, "Decompiler")
@@ -438,6 +440,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._callgraph, "Call graph")
         tabs.addTab(self._patches, "Patches")
         tabs.addTab(self._search, "Search")
+        tabs.addTab(self._diff, "Diff")
         tabs.setTabsClosable(False)
         tabs.setDocumentMode(True)
         tabs.setMovable(True)
@@ -989,6 +992,7 @@ class MainWindow(QMainWindow):
             ("Call graph", self._callgraph),
             ("Patches", self._patches),
             ("Search", self._search),
+            ("Diff", self._diff),
         ]
         for title, w in tab_targets:
             act = QAction(title, self)
@@ -1164,6 +1168,11 @@ class MainWindow(QMainWindow):
         c.search_results_updated.connect(self._search.load)
         self._search.search_requested.connect(self._ctrl.search_program)
         self._search.navigate_requested.connect(self._ctrl.navigate_to_address)
+        c.diff_updated.connect(self._diff.load)
+        c.diff_progress.connect(self._diff.set_busy)
+        self._diff.navigate_requested.connect(self._ctrl.navigate_to_address)
+        self._diff.compare_requested.connect(self._choose_comparison_binary)
+        self._diff.close_comparison_requested.connect(self._close_comparison)
 
     def _restore_all_panels(self) -> None:
         """Re-show dock widgets after the user closes them from the title bar."""
@@ -1499,6 +1508,18 @@ class MainWindow(QMainWindow):
                 f"Could not export the patched binary: {result.get('error', 'failed')}"
                 f"{chr(10) + hint if hint else ''}"
             )
+
+    def _choose_comparison_binary(self) -> None:
+        if not self._program_loaded:
+            self.statusBar().showMessage("Load a binary before comparing.", 5000)
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Compare with binary", "", "All files (*)")
+        if path:
+            self._ctrl.compare_with_binary(path)
+
+    def _close_comparison(self) -> None:
+        self._ctrl.close_comparison()
+        self._diff.clear()
 
     def _focus_search(self) -> None:
         self._tabs.setCurrentWidget(self._search)

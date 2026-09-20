@@ -82,6 +82,8 @@ class RawViewQtController(QObject):
     patch_applied = Signal(object)  # dict result of a patch, assemble or revert
     patch_export_finished = Signal(object)  # dict from export_patched_file
     search_results_updated = Signal(object)  # dict from search_program
+    diff_progress = Signal(str)  # human-readable step while a comparison is being prepared
+    diff_updated = Signal(object)  # dict from diff_programs
     bridge_prewarm_finished = Signal(bool, str)  # ok, message (NO_GHIDRA / BAD_GHIDRA / ...)
     session_restore_hints = Signal(object)  # dict: hex_dump_size, hex_dump_bpl (optional current_address)
     analysis_batch_changed = Signal(object)  # dict: paths, next_index, count, loaded_program
@@ -878,6 +880,51 @@ class RawViewQtController(QObject):
                 )
 
         threading.Thread(target=work, name="rawview-search", daemon=True).start()
+
+    def compare_with_binary(self, path: str) -> None:
+        """
+        Import ``path`` beside the loaded program, analyze it, and diff the two.
+
+        Import and analysis of the second binary take as long as they did for the first, so this
+        runs off-thread and reports each step; the pane would otherwise sit silent for a minute.
+        """
+        if self._api is None:
+            self.diff_updated.emit({"error": "no_program", "hint": "load a binary first"})
+            return
+
+        def work() -> None:
+            try:
+                assert self._api is not None
+                self.diff_progress.emit(f"Importing {Path(path).name}...")
+                opened = self._api.open_comparison_file(path)
+                if not opened.get("ok"):
+                    self.diff_updated.emit(opened)
+                    return
+                self.diff_progress.emit(f"Analyzing {opened.get('name', 'the second binary')}...")
+                analyzed = self._api.analyze_comparison_program()
+                if not analyzed.get("ok"):
+                    self.diff_updated.emit(analyzed)
+                    return
+                self.diff_progress.emit("Comparing functions...")
+                self.diff_updated.emit(self._api.diff_programs())
+            except Exception as e:
+                logger.exception("compare")
+                self.diff_updated.emit({"error": "bridge_error", "hint": str(e)[:300]})
+
+        threading.Thread(target=work, name="rawview-diff", daemon=True).start()
+
+    def close_comparison(self) -> None:
+        if self._api is None:
+            return
+
+        def work() -> None:
+            try:
+                assert self._api is not None
+                self._api.close_comparison_program()
+            except Exception:
+                logger.debug("close comparison", exc_info=True)
+
+        threading.Thread(target=work, name="rawview-diff-close", daemon=True).start()
 
     # -- patching ---------------------------------------------------------------------
     #

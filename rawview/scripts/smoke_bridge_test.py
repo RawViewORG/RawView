@@ -56,7 +56,7 @@ def main() -> int:
     print("function_count:", len(fns), flush=True)
     for f in fns[:12]:
         print(" ", f, flush=True)
-    failures = _check_engine(api)
+    failures = _check_engine(api, test_bin)
     bridge.stop()
     if failures:
         for f in failures:
@@ -67,7 +67,7 @@ def main() -> int:
     return 0
 
 
-def _check_engine(api: "GhidraAPI") -> list[str]:  # noqa: F821
+def _check_engine(api: "GhidraAPI", test_bin: str = "") -> list[str]:  # noqa: F821
     """Exercise the parts of the bridge that need a real program, returning human-readable failures."""
     failures: list[str] = []
 
@@ -241,6 +241,27 @@ def _check_engine(api: "GhidraAPI") -> list[str]:  # noqa: F821
         Path(out_path).unlink(missing_ok=True)
     except OSError:
         pass
+
+    # Comparing a program with itself is the one diff whose answer is known in advance.
+    check("diff_without_comparison", api.diff_programs().get("error") == "no_comparison_program", "rejected")
+    opened = api.open_comparison_file(test_bin)
+    check("open_comparison_file", bool(opened.get("ok")), opened.get("name"))
+    if opened.get("ok"):
+        api.analyze_comparison_program()
+        self_diff = api.diff_programs()
+        check(
+            "diff_self_is_clean",
+            not self_diff.get("changed") and not self_diff.get("only_in_a")
+            and not self_diff.get("only_in_b"),
+            {k: len(self_diff.get(k, [])) for k in ("changed", "only_in_a", "only_in_b")},
+        )
+        check("diff_self_matches_all", self_diff.get("identical", 0) > 0, self_diff.get("identical"))
+        api.close_comparison_program()
+    check(
+        "open_comparison_rejects_missing_file",
+        api.open_comparison_file(test_bin + ".nope").get("error") == "not_a_file",
+        "rejected",
+    )
 
     check("cancel_analysis_when_idle", api.cancel_analysis().get("ok") is False, "no analysis running")
     check("is_analysis_running", api.is_analysis_running() is False, False)

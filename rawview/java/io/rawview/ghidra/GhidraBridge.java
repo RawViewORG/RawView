@@ -42,6 +42,7 @@ import ghidra.program.model.listing.FunctionManager;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Listing;
+import ghidra.program.model.lang.Register;
 import ghidra.program.model.listing.Program;
 import ghidra.program.model.symbol.Namespace;
 import ghidra.program.model.listing.Variable;
@@ -53,6 +54,7 @@ import ghidra.program.model.pcode.HighFunctionDBUtil;
 import ghidra.program.model.pcode.HighSymbol;
 import ghidra.program.model.pcode.LocalSymbolMap;
 import ghidra.program.model.reloc.Relocation;
+import ghidra.program.model.scalar.Scalar;
 import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceIterator;
 import ghidra.program.model.symbol.ReferenceManager;
@@ -125,6 +127,7 @@ public class GhidraBridge {
     }
 
     public synchronized String openFile(String path) throws Exception {
+        releaseComparisonProgram();
         closeCurrentProgramAndProject();
         File bin = new File(path);
         if (!bin.isFile()) {
@@ -1507,6 +1510,327 @@ public class GhidraBridge {
     }
 
 
+
+
+    /**
+     * Second program held open purely for comparison. Never analysed, never edited, and dropped by
+     * {@link #closeComparisonProgram()} or by opening a different binary.
+     */
+    private Program comparisonProgram;
+    private String comparisonPath = "";
+    /** Ceiling on rows in one diff answer, per category. */
+    private static final int MAX_DIFF_ROWS = 400;
+
+    /**
+     * Imports {@code path} alongside the loaded program so the two can be compared.
+     *
+     * <p>Imported into the same project but left out of the UI's view of the world: the comparison
+     * program is not the thing the user is navigating, and analysing it would cost as much as the
+     * program they actually opened. Function bodies are read straight from the listing, so the
+     * comparison works on whatever the loader produced.
+     */
+    public synchronized String openComparisonFile(String path) throws Exception {
+        ensureProgram();
+        File bin = new File(path);
+        if (!bin.isFile()) {
+            return "{\"error\":\"not_a_file\",\"path\":\"" + escapeJson(path) + "\"}";
+        }
+        releaseComparisonProgram();
+        try {
+            comparisonProgram = ghidraProject.importProgram(bin);
+        } catch (CancelledException e) {
+            return "{\"error\":\"import_cancelled\"}";
+        }
+        if (comparisonProgram == null) {
+            return "{\"error\":\"import_failed\",\"path\":\"" + escapeJson(path) + "\"}";
+        }
+        comparisonPath = bin.getAbsolutePath();
+        return "{\"ok\":true,\"name\":\"" + escapeJson(comparisonProgram.getName())
+                + "\",\"path\":\"" + escapeJson(comparisonPath)
+                + "\",\"functions\":" + countFunctions(comparisonProgram) + "}";
+    }
+
+    /** Runs auto-analysis on the comparison program, so its function list is comparable. */
+    public synchronized String analyzeComparisonProgram() throws Exception {
+        if (comparisonProgram == null) {
+            return "{\"error\":\"no_comparison_program\"}";
+        }
+        long started = System.currentTimeMillis();
+        int txId = comparisonProgram.startTransaction("Analyze comparison");
+        boolean commit = false;
+        try {
+            AutoAnalysisManager mgr = AutoAnalysisManager.getAnalysisManager(comparisonProgram);
+            mgr.initializeOptions();
+            mgr.reAnalyzeAll(null);
+            mgr.startAnalysis(TaskMonitor.DUMMY);
+            GhidraProgramUtilities.markProgramAnalyzed(comparisonProgram);
+            commit = true;
+        } finally {
+            comparisonProgram.endTransaction(txId, commit);
+        }
+        return "{\"ok\":true,\"seconds\":" + ((System.currentTimeMillis() - started) / 1000)
+                + ",\"functions\":" + countFunctions(comparisonProgram) + "}";
+    }
+
+    public synchronized String closeComparisonProgram() {
+        releaseComparisonProgram();
+        return "{\"ok\":true}";
+    }
+
+    private void releaseComparisonProgram() {
+        if (comparisonProgram != null) {
+            try {
+                comparisonProgram.release(this);
+            } catch (Exception ignored) {
+                // Already released, or released by the project closing; nothing to recover.
+            }
+            comparisonProgram = null;
+        }
+        comparisonPath = "";
+    }
+
+    private static int countFunctions(Program p) {
+        int n = 0;
+        FunctionIterator it = p.getFunctionManager().getFunctions(true);
+        while (it.hasNext()) {
+            it.next();
+            n++;
+        }
+        return n;
+    }
+
+    /**
+     * Compares the loaded program against the comparison one, function by function.
+     *
+     * <p>Functions are matched by name where both sides have a real one, and otherwise by a hash of
+     * the function's mnemonic sequence. Hashing mnemonics rather than bytes is what makes the diff
+     * useful on a recompiled or rebased binary: the same code at a different address, with
+     * different operand encodings, hashes the same, so the output is the handful of functions that
+     * actually changed rather than every function that moved.
+     *
+     * <p>Stripped binaries produce default names ({@code FUN_00401000}) on both sides that would
+     * otherwise "match" by name while being unrelated code, so those are matched by hash only.
+     */
+    public synchronized String diffProgramsJson(int limit) throws Exception {
+        ensureProgram();
+        if (comparisonProgram == null) {
+            return "{\"error\":\"no_comparison_program\",\"hint\":\"call openComparisonFile first\"}";
+        }
+        int cap = limit <= 0 ? MAX_DIFF_ROWS : Math.min(limit, MAX_DIFF_ROWS);
+        Map<String, FunctionFingerprint> left = fingerprintFunctions(program);
+        Map<String, FunctionFingerprint> right = fingerprintFunctions(comparisonProgram);
+
+        // A name can appear more than once - a thunk and the function it forwards to both answer
+        // to "printf" - so both indexes hold every candidate and matching consumes one at a time.
+        Map<String, List<FunctionFingerprint>> leftByName = new LinkedHashMap<>();
+        Map<String, List<FunctionFingerprint>> leftByHash = new LinkedHashMap<>();
+        for (FunctionFingerprint fp : left.values()) {
+            if (!fp.defaultName) {
+                leftByName.computeIfAbsent(fp.name, k -> new ArrayList<>()).add(fp);
+            }
+            leftByHash.computeIfAbsent(fp.hash, k -> new ArrayList<>()).add(fp);
+        }
+
+        List<String> changed = new ArrayList<>();
+        List<String> onlyRight = new ArrayList<>();
+        Set<String> matchedLeft = new HashSet<>();
+        int identical = 0;
+
+        for (FunctionFingerprint rf : right.values()) {
+            FunctionFingerprint match = rf.defaultName
+                    ? null
+                    : pickCandidate(leftByName.get(rf.name), matchedLeft, rf.hash);
+            boolean byName = match != null;
+            if (match == null) {
+                match = pickCandidate(leftByHash.get(rf.hash), matchedLeft, rf.hash);
+            }
+            if (match == null) {
+                if (onlyRight.size() < cap) {
+                    onlyRight.add(fingerprintJson(rf, null, "only_in_b"));
+                }
+                continue;
+            }
+            matchedLeft.add(match.address);
+            if (match.hash.equals(rf.hash)) {
+                identical++;
+            } else if (changed.size() < cap) {
+                changed.add(fingerprintJson(match, rf, byName ? "changed" : "changed_by_hash"));
+            }
+        }
+
+        List<String> onlyLeft = new ArrayList<>();
+        for (FunctionFingerprint lf : left.values()) {
+            if (matchedLeft.contains(lf.address)) {
+                continue;
+            }
+            if (onlyLeft.size() < cap) {
+                onlyLeft.add(fingerprintJson(lf, null, "only_in_a"));
+            }
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"a\":{\"name\":\"").append(escapeJson(program.getName()))
+          .append("\",\"functions\":").append(left.size()).append("}")
+          .append(",\"b\":{\"name\":\"").append(escapeJson(comparisonProgram.getName()))
+          .append("\",\"path\":\"").append(escapeJson(comparisonPath))
+          .append("\",\"functions\":").append(right.size()).append("}")
+          .append(",\"identical\":").append(identical)
+          .append(",\"changed\":[").append(String.join(",", changed))
+          .append("],\"only_in_a\":[").append(String.join(",", onlyLeft))
+          .append("],\"only_in_b\":[").append(String.join(",", onlyRight))
+          .append("],\"truncated\":")
+          .append(changed.size() >= cap || onlyLeft.size() >= cap || onlyRight.size() >= cap)
+          .append('}');
+        return sb.toString();
+    }
+
+    /**
+     * First unclaimed candidate, preferring one whose code is identical.
+     *
+     * <p>Preferring the equal hash is what stops two same-named functions from being paired the
+     * wrong way round and reported as two changes when they are really one match and one move.
+     */
+    private static FunctionFingerprint pickCandidate(List<FunctionFingerprint> candidates,
+            Set<String> claimed, String preferredHash) {
+        if (candidates == null) {
+            return null;
+        }
+        FunctionFingerprint fallback = null;
+        for (FunctionFingerprint candidate : candidates) {
+            if (claimed.contains(candidate.address)) {
+                continue;
+            }
+            if (candidate.hash.equals(preferredHash)) {
+                return candidate;
+            }
+            if (fallback == null) {
+                fallback = candidate;
+            }
+        }
+        return fallback;
+    }
+
+    /** What the diff knows about one function: where it is, how big, and what its code looks like. */
+    private static final class FunctionFingerprint {
+        String name;
+        String address;
+        long size;
+        int instructions;
+        String hash;
+        boolean defaultName;
+    }
+
+    private static Map<String, FunctionFingerprint> fingerprintFunctions(Program p) {
+        Map<String, FunctionFingerprint> out = new LinkedHashMap<>();
+        Listing listing = p.getListing();
+        FunctionIterator it = p.getFunctionManager().getFunctions(true);
+        while (it.hasNext()) {
+            Function f = it.next();
+            if (f.isExternal()) {
+                continue;
+            }
+            FunctionFingerprint fp = new FunctionFingerprint();
+            fp.name = f.getName();
+            fp.address = f.getEntryPoint().toString();
+            fp.size = f.getBody() == null ? 0 : f.getBody().getNumAddresses();
+            fp.defaultName = isDefaultFunctionName(fp.name);
+            StringBuilder normalized = new StringBuilder();
+            InstructionIterator ins = listing.getInstructions(f.getBody(), true);
+            int count = 0;
+            while (ins.hasNext()) {
+                appendNormalizedInstruction(normalized, ins.next());
+                count++;
+            }
+            fp.instructions = count;
+            fp.hash = sha256(normalized.toString());
+            out.put(fp.address, fp);
+        }
+        return out;
+    }
+
+    /**
+     * Writes one instruction in the form the diff compares: mnemonic, registers and constants kept,
+     * absolute addresses replaced by a placeholder.
+     *
+     * <p>Both halves of that matter. Keeping constants is what lets the diff see a changed XOR key,
+     * a different port or a new magic value - the edits that distinguish one malware build from the
+     * next, and which a mnemonics-only hash is blind to. Normalising addresses is what stops a
+     * rebased or recompiled binary from reporting every function as changed because its calls and
+     * string references point somewhere else.
+     */
+    private static void appendNormalizedInstruction(StringBuilder out, Instruction ins) {
+        out.append(ins.getMnemonicString());
+        for (int i = 0; i < ins.getNumOperands(); i++) {
+            out.append(' ');
+            Object[] parts;
+            try {
+                parts = ins.getOpObjects(i);
+            } catch (Exception ignored) {
+                out.append('?');
+                continue;
+            }
+            if (parts == null || parts.length == 0) {
+                out.append('_');
+                continue;
+            }
+            for (Object part : parts) {
+                if (part instanceof Register reg) {
+                    out.append(reg.getName());
+                } else if (part instanceof Scalar scalar) {
+                    out.append(scalar.getUnsignedValue());
+                } else if (part instanceof Address) {
+                    out.append("ADDR");
+                } else if (part != null) {
+                    out.append(part.getClass().getSimpleName());
+                }
+                out.append(',');
+            }
+        }
+        out.append('\n');
+    }
+
+    /** True for the names Ghidra makes up, which carry no information to match on. */
+    private static boolean isDefaultFunctionName(String name) {
+        if (name == null) {
+            return true;
+        }
+        return name.startsWith("FUN_") || name.startsWith("thunk_FUN_") || name.startsWith("SUB_");
+    }
+
+    private static String sha256(String text) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+                sb.append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            // No SHA-256 in this JVM is not a thing, but a diff that silently matched everything
+            // would be worse than one that matches nothing.
+            return "nohash:" + text.length();
+        }
+    }
+
+    private static String fingerprintJson(FunctionFingerprint a, FunctionFingerprint b, String kind) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"kind\":\"").append(escapeJson(kind)).append('"')
+          .append(",\"name\":\"").append(escapeJson(a.name)).append('"')
+          .append(",\"address\":\"").append(escapeJson(a.address)).append('"')
+          .append(",\"size\":").append(a.size)
+          .append(",\"instructions\":").append(a.instructions);
+        if (b != null) {
+            sb.append(",\"other_name\":\"").append(escapeJson(b.name)).append('"')
+              .append(",\"other_address\":\"").append(escapeJson(b.address)).append('"')
+              .append(",\"other_size\":").append(b.size)
+              .append(",\"other_instructions\":").append(b.instructions)
+              .append(",\"instruction_delta\":").append(b.instructions - a.instructions);
+        }
+        sb.append('}');
+        return sb.toString();
+    }
 
     /** Result cap per kind for {@link #searchProgramJson}, so one broad query cannot return a program. */
     private static final int MAX_SEARCH_HITS_PER_KIND = 200;
