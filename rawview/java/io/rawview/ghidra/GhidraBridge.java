@@ -43,6 +43,7 @@ import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.InstructionIterator;
 import ghidra.program.model.listing.Listing;
 import ghidra.program.model.listing.Program;
+import ghidra.program.model.symbol.Namespace;
 import ghidra.program.model.listing.Variable;
 import ghidra.program.model.mem.Memory;
 import ghidra.program.model.mem.MemoryBlock;
@@ -56,6 +57,7 @@ import ghidra.program.model.symbol.Reference;
 import ghidra.program.model.symbol.ReferenceIterator;
 import ghidra.program.model.symbol.ReferenceManager;
 import ghidra.program.model.symbol.SourceType;
+import ghidra.program.model.symbol.SymbolType;
 import ghidra.program.model.symbol.Symbol;
 import ghidra.program.model.symbol.SymbolIterator;
 import ghidra.program.model.symbol.SymbolTable;
@@ -1504,6 +1506,408 @@ public class GhidraBridge {
         return sb.toString();
     }
 
+
+
+    /** Result cap per kind for {@link #searchProgramJson}, so one broad query cannot return a program. */
+    private static final int MAX_SEARCH_HITS_PER_KIND = 200;
+
+    /**
+     * One substring query across everything a program is made of.
+     *
+     * <p>{@code kinds} is a comma-separated subset of {@code functions,symbols,strings,imports,
+     * exports,data}, or empty for all of them. Matching is case-insensitive substring, which is what
+     * someone typing a fragment of a name into a search box means; a query that parses as an address
+     * also yields an {@code address} hit, so pasting one navigates rather than finding nothing.
+     *
+     * <p>Every kind is capped at {@link #MAX_SEARCH_HITS_PER_KIND} and reports {@code truncated}
+     * per kind, because "strings containing e" is a perfectly ordinary thing to type by accident.
+     */
+    public synchronized String searchProgramJson(String query, int limitPerKind, String kinds)
+            throws Exception {
+        ensureProgram();
+        String raw = query == null ? "" : query.trim();
+        if (raw.isEmpty()) {
+            return "{\"error\":\"empty_query\",\"results\":[]}";
+        }
+        String needle = raw.toLowerCase(Locale.ROOT);
+        int cap = limitPerKind <= 0
+                ? MAX_SEARCH_HITS_PER_KIND
+                : Math.min(limitPerKind, MAX_SEARCH_HITS_PER_KIND);
+        String want = kinds == null ? "" : kinds.trim().toLowerCase(Locale.ROOT);
+        boolean all = want.isEmpty() || "all".equals(want);
+
+        StringBuilder sb = new StringBuilder("{\"query\":\"").append(escapeJson(raw))
+                .append("\",\"results\":[");
+        Counter emitted = new Counter();
+        Map<String, Boolean> truncated = new LinkedHashMap<>();
+
+        if (all || want.contains("address")) {
+            Address parsed = parseAddress(raw);
+            if (parsed != null) {
+                Function f = program.getFunctionManager().getFunctionContaining(parsed);
+                appendSearchHit(sb, emitted, "address", parsed.toString(),
+                        f != null ? f.getName() : "", "address as typed");
+            }
+        }
+
+        if (all || want.contains("functions")) {
+            int n = 0;
+            FunctionIterator it = program.getFunctionManager().getFunctions(true);
+            while (it.hasNext()) {
+                Function f = it.next();
+                if (!f.getName().toLowerCase(Locale.ROOT).contains(needle)) {
+                    continue;
+                }
+                if (n >= cap) {
+                    truncated.put("functions", true);
+                    break;
+                }
+                n++;
+                appendSearchHit(sb, emitted, "function", f.getEntryPoint().toString(), f.getName(),
+                        f.getSignature() == null ? "" : f.getSignature().getPrototypeString());
+            }
+        }
+
+        if (all || want.contains("symbols")) {
+            int n = 0;
+            SymbolIterator it = program.getSymbolTable().getAllSymbols(true);
+            while (it.hasNext()) {
+                Symbol s = it.next();
+                if (!s.getName().toLowerCase(Locale.ROOT).contains(needle)) {
+                    continue;
+                }
+                if (n >= cap) {
+                    truncated.put("symbols", true);
+                    break;
+                }
+                n++;
+                appendSearchHit(sb, emitted, "symbol", s.getAddress().toString(), s.getName(),
+                        s.getSymbolType() == null ? "" : s.getSymbolType().toString());
+            }
+        }
+
+        if (all || want.contains("imports") || want.contains("exports")) {
+            boolean wantImports = all || want.contains("imports");
+            boolean wantExports = all || want.contains("exports");
+            int imports = 0;
+            int exports = 0;
+            SymbolIterator it = program.getSymbolTable().getAllSymbols(true);
+            while (it.hasNext()) {
+                Symbol s = it.next();
+                if (!s.getName().toLowerCase(Locale.ROOT).contains(needle)) {
+                    continue;
+                }
+                if (wantImports && s.isExternal()) {
+                    if (imports >= cap) {
+                        truncated.put("imports", true);
+                        continue;
+                    }
+                    imports++;
+                    String lib = s.getParentNamespace() != null ? s.getParentNamespace().getName() : "";
+                    appendSearchHit(sb, emitted, "import", s.getAddress().toString(), s.getName(), lib);
+                } else if (wantExports && !s.isExternal() && s.isPrimary()
+                        && s.getSymbolType() == SymbolType.FUNCTION && isExported(s)) {
+                    if (exports >= cap) {
+                        truncated.put("exports", true);
+                        continue;
+                    }
+                    exports++;
+                    appendSearchHit(sb, emitted, "export", s.getAddress().toString(), s.getName(), "");
+                }
+            }
+        }
+
+        if (all || want.contains("strings") || want.contains("data")) {
+            boolean wantStrings = all || want.contains("strings");
+            boolean wantData = all || want.contains("data");
+            int strings = 0;
+            int data = 0;
+            DataIterator dit = program.getListing().getDefinedData(true);
+            while (dit.hasNext()) {
+                Data d = dit.next();
+                if (d.hasStringValue()) {
+                    if (!wantStrings) {
+                        continue;
+                    }
+                    String value = d.getDefaultValueRepresentation();
+                    if (value == null || !value.toLowerCase(Locale.ROOT).contains(needle)) {
+                        continue;
+                    }
+                    if (strings >= cap) {
+                        truncated.put("strings", true);
+                        continue;
+                    }
+                    strings++;
+                    appendSearchHit(sb, emitted, "string", d.getAddressString(true, false), value,
+                            d.getDataType() == null ? "" : d.getDataType().getName());
+                } else if (wantData) {
+                    String label = d.getLabel();
+                    if (label == null || !label.toLowerCase(Locale.ROOT).contains(needle)) {
+                        continue;
+                    }
+                    if (data >= cap) {
+                        truncated.put("data", true);
+                        continue;
+                    }
+                    data++;
+                    appendSearchHit(sb, emitted, "data", d.getAddressString(true, false), label,
+                            d.getDataType() == null ? "" : d.getDataType().getName());
+                }
+            }
+        }
+
+        sb.append("],\"count\":").append(emitted.value).append(",\"truncated\":{");
+        boolean firstT = true;
+        for (Map.Entry<String, Boolean> e : truncated.entrySet()) {
+            if (!firstT) {
+                sb.append(',');
+            }
+            firstT = false;
+            sb.append('"').append(escapeJson(e.getKey())).append("\":true");
+        }
+        sb.append("}}");
+        return sb.toString();
+    }
+
+    /** Mutable counter so the JSON writer can tell whether a comma is needed across several loops. */
+    private static final class Counter {
+        int value;
+    }
+
+    private static void appendSearchHit(StringBuilder sb, Counter emitted, String kind, String address,
+            String name, String detail) {
+        if (emitted.value > 0) {
+            sb.append(',');
+        }
+        emitted.value++;
+        sb.append("{\"kind\":\"").append(escapeJson(kind)).append('"')
+          .append(",\"address\":\"").append(escapeJson(address)).append('"')
+          .append(",\"name\":\"").append(escapeJson(truncateValue(name))).append('"')
+          .append(",\"detail\":\"").append(escapeJson(truncateValue(detail))).append("\"}");
+    }
+
+    /** Keeps one absurd string from dominating a result set. */
+    private static String truncateValue(String s) {
+        if (s == null) {
+            return "";
+        }
+        return s.length() <= 300 ? s : s.substring(0, 300) + "...";
+    }
+
+    private static boolean isExported(Symbol s) {
+        try {
+            return s.isExternalEntryPoint();
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    /**
+     * The program's memory map: one row per block, with permissions and whether it has bytes.
+     *
+     * <p>Answers "where does this address live" and "what is even mapped here", which otherwise
+     * needs the Ghidra UI.
+     */
+    public synchronized String listSegmentsJson() throws Exception {
+        ensureProgram();
+        StringBuilder sb = new StringBuilder("[");
+        boolean first = true;
+        for (MemoryBlock b : program.getMemory().getBlocks()) {
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            sb.append("{\"name\":\"").append(escapeJson(b.getName())).append('"')
+              .append(",\"start\":\"").append(escapeJson(b.getStart().toString())).append('"')
+              .append(",\"end\":\"").append(escapeJson(b.getEnd().toString())).append('"')
+              .append(",\"size\":").append(b.getSize())
+              .append(",\"read\":").append(b.isRead())
+              .append(",\"write\":").append(b.isWrite())
+              .append(",\"execute\":").append(b.isExecute())
+              .append(",\"initialized\":").append(b.isInitialized())
+              .append(",\"overlay\":").append(b.isOverlay())
+              .append('}');
+        }
+        sb.append(']');
+        return sb.toString();
+    }
+
+    /** Namespaces and classes defined in the program, excluding the global one. */
+    public synchronized String listNamespacesJson() throws Exception {
+        ensureProgram();
+        Set<String> seen = new HashSet<>();
+        StringBuilder sb = new StringBuilder("[");
+        boolean first = true;
+        SymbolIterator it = program.getSymbolTable().getAllSymbols(true);
+        while (it.hasNext()) {
+            Symbol s = it.next();
+            Namespace ns = s.getParentNamespace();
+            if (ns == null || ns.isGlobal()) {
+                continue;
+            }
+            String name = ns.getName(true);
+            if (!seen.add(name)) {
+                continue;
+            }
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            sb.append("{\"name\":\"").append(escapeJson(name)).append('"')
+              .append(",\"kind\":\"")
+              .append(escapeJson(ns.getSymbol() != null && ns.getSymbol().getSymbolType() != null
+                      ? ns.getSymbol().getSymbolType().toString() : "namespace"))
+              .append("\"}");
+        }
+        sb.append(']');
+        return sb.toString();
+    }
+
+    /** Defined data other than strings: labelled globals, tables, structures. */
+    public synchronized String listDataItemsJson(int offset, int limit) throws Exception {
+        ensureProgram();
+        int from = Math.max(0, offset);
+        int max = limit <= 0 ? 500 : Math.min(limit, 5000);
+        StringBuilder sb = new StringBuilder("{\"rows\":[");
+        boolean first = true;
+        int seen = 0;
+        int emitted = 0;
+        DataIterator dit = program.getListing().getDefinedData(true);
+        while (dit.hasNext()) {
+            Data d = dit.next();
+            String label = d.getLabel();
+            if (label == null || label.isEmpty()) {
+                continue;
+            }
+            if (seen++ < from) {
+                continue;
+            }
+            if (emitted >= max) {
+                break;
+            }
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            emitted++;
+            sb.append("{\"address\":\"").append(escapeJson(d.getAddressString(true, false))).append('"')
+              .append(",\"label\":\"").append(escapeJson(label)).append('"')
+              .append(",\"type\":\"")
+              .append(escapeJson(d.getDataType() == null ? "" : d.getDataType().getName())).append('"')
+              .append(",\"value\":\"")
+              .append(escapeJson(truncateValue(d.getDefaultValueRepresentation()))).append("\"}");
+        }
+        sb.append("],\"offset\":").append(from).append(",\"count\":").append(emitted)
+          .append(",\"truncated\":").append(dit.hasNext()).append('}');
+        return sb.toString();
+    }
+
+    /** Renames the label at an address without touching any function there. */
+    public synchronized String renameDataJson(String addressText, String newName) throws Exception {
+        ensureProgram();
+        Address addr = parseAddress(addressText);
+        if (addr == null) {
+            return "{\"error\":\"invalid_address\"}";
+        }
+        String name = newName == null ? "" : newName.trim();
+        if (name.isEmpty()) {
+            return "{\"error\":\"empty_name\"}";
+        }
+        Symbol sym = program.getSymbolTable().getPrimarySymbol(addr);
+        return inTransaction("Rename data", () -> {
+            if (sym == null) {
+                program.getSymbolTable().createLabel(addr, name, SourceType.USER_DEFINED);
+                return "{\"ok\":true,\"created\":true,\"address\":\"" + escapeJson(addr.toString())
+                        + "\",\"name\":\"" + escapeJson(name) + "\"}";
+            }
+            String previous = sym.getName();
+            sym.setName(name, SourceType.USER_DEFINED);
+            return "{\"ok\":true,\"created\":false,\"address\":\"" + escapeJson(addr.toString())
+                    + "\",\"name\":\"" + escapeJson(name) + "\",\"previous_name\":\""
+                    + escapeJson(previous) + "\"}";
+        });
+    }
+
+    /** Sets the type of one local or parameter, the way retyping it in the decompiler would. */
+    public synchronized String setLocalVariableTypeJson(String functionAddress, String variableName,
+            String typeName) throws Exception {
+        ensureProgram();
+        Function f = resolveFunction(functionAddress);
+        if (f == null) {
+            return "{\"error\":\"no_function\"}";
+        }
+        String varName = variableName == null ? "" : variableName.trim();
+        String wanted = typeName == null ? "" : typeName.trim();
+        if (varName.isEmpty() || wanted.isEmpty()) {
+            return "{\"error\":\"empty_argument\"}";
+        }
+        DataType dt;
+        try {
+            dt = new CParser(program.getDataTypeManager()).parse(wanted + " x;");
+        } catch (Exception e) {
+            return "{\"error\":\"bad_type\",\"hint\":\"" + escapeJson(shortMessage(e)) + "\"}";
+        }
+        if (dt == null) {
+            return "{\"error\":\"bad_type\",\"hint\":\"" + escapeJson(wanted) + " did not parse\"}";
+        }
+        DecompileResults results = decompiler.decompileFunction(f, DECOMPILE_TIMEOUT_S,
+                TaskMonitor.DUMMY);
+        HighFunction high = results != null ? results.getHighFunction() : null;
+        if (high != null) {
+            LocalSymbolMap locals = high.getLocalSymbolMap();
+            List<HighSymbol> candidates = new ArrayList<>();
+            Iterator<HighSymbol> symbols = locals.getSymbols();
+            while (symbols.hasNext()) {
+                candidates.add(symbols.next());
+            }
+            for (int i = 0; i < locals.getNumParams(); i++) {
+                HighSymbol psym = locals.getParamSymbol(i);
+                if (psym != null) {
+                    candidates.add(psym);
+                }
+            }
+            for (HighSymbol hs : candidates) {
+                if (!varName.equals(hs.getName())) {
+                    continue;
+                }
+                final DataType applied = dt;
+                try {
+                    return inTransaction("Set variable type", () -> {
+                        HighFunctionDBUtil.updateDBVariable(hs, hs.getName(), applied,
+                                SourceType.USER_DEFINED);
+                        return "{\"ok\":true,\"function\":\"" + escapeJson(f.getName())
+                                + "\",\"variable\":\"" + escapeJson(varName) + "\",\"type\":\""
+                                + escapeJson(applied.getName()) + "\"}";
+                    });
+                } catch (Exception e) {
+                    // Ghidra refuses a type whose size does not fit the storage the variable has,
+                    // which is an answer, not a bridge failure: report it like any other rejection.
+                    return "{\"error\":\"type_rejected\",\"hint\":\"" + escapeJson(shortMessage(e))
+                            + "\",\"variable\":\"" + escapeJson(varName) + "\",\"type\":\""
+                            + escapeJson(applied.getName()) + "\"}";
+                }
+            }
+        }
+        for (Variable v : f.getAllVariables()) {
+            if (!varName.equals(v.getName())) {
+                continue;
+            }
+            final DataType applied = dt;
+            try {
+                return inTransaction("Set variable type", () -> {
+                    v.setDataType(applied, SourceType.USER_DEFINED);
+                    return "{\"ok\":true,\"function\":\"" + escapeJson(f.getName())
+                            + "\",\"variable\":\"" + escapeJson(varName) + "\",\"type\":\""
+                            + escapeJson(applied.getName()) + "\"}";
+                });
+            } catch (Exception e) {
+                return "{\"error\":\"type_rejected\",\"hint\":\"" + escapeJson(shortMessage(e))
+                        + "\",\"variable\":\"" + escapeJson(varName) + "\",\"type\":\""
+                        + escapeJson(applied.getName()) + "\"}";
+            }
+        }
+        return "{\"error\":\"no_such_variable\",\"variables\":" + variableNamesJson(f, high) + "}";
+    }
 
     /** Longest patch accepted in one call, and the cap on how much of a file the patch scan reports. */
     private static final int MAX_PATCH_BYTES = 4096;

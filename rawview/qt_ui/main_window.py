@@ -65,6 +65,7 @@ from rawview.config import user_data_dir
 from rawview.qt_ui.cfg_panel import CfgPanel
 from rawview.qt_ui.callgraph_panel import CallGraphPanel
 from rawview.qt_ui.patches_panel import PatchesPanel
+from rawview.qt_ui.search_panel import SearchPanel
 from rawview.qt_ui.controller import RawViewQtController
 from rawview.qt_ui.hex_view import HexViewPanel
 from rawview.qt_ui.highlighter import PseudocodeHighlighter
@@ -422,6 +423,7 @@ class MainWindow(QMainWindow):
         self._cfg = CfgPanel()
         self._callgraph = CallGraphPanel()
         self._patches = PatchesPanel(mono)
+        self._search = SearchPanel(mono)
 
         tabs = QTabWidget()
         tabs.addTab(self._decompiler, "Decompiler")
@@ -435,6 +437,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._cfg, "CFG")
         tabs.addTab(self._callgraph, "Call graph")
         tabs.addTab(self._patches, "Patches")
+        tabs.addTab(self._search, "Search")
         tabs.setTabsClosable(False)
         tabs.setDocumentMode(True)
         tabs.setMovable(True)
@@ -966,6 +969,12 @@ class MainWindow(QMainWindow):
         self._act_show_tutorial.triggered.connect(self._on_show_tutorial)
         m_view.addAction(self._act_show_tutorial)
 
+        act_find = QAction("Search everywhere", self)
+        act_find.setShortcut("Ctrl+Shift+F")
+        act_find.setToolTip("Open the Search tab and put the cursor in the query box.")
+        act_find.triggered.connect(self._focus_search)
+        m_view.addAction(act_find)
+
         m_tabs = m_view.addMenu("Analysis tabs")
         tab_targets: list[tuple[str, QWidget]] = [
             ("Decompiler", self._decompiler),
@@ -979,6 +988,7 @@ class MainWindow(QMainWindow):
             ("CFG", self._cfg),
             ("Call graph", self._callgraph),
             ("Patches", self._patches),
+            ("Search", self._search),
         ]
         for title, w in tab_targets:
             act = QAction(title, self)
@@ -1151,6 +1161,9 @@ class MainWindow(QMainWindow):
         self._patches.refresh_requested.connect(self._ctrl.refresh_patches)
         self._patches.revert_requested.connect(self._on_revert_patch)
         self._patches.export_requested.connect(self._export_patched_binary)
+        c.search_results_updated.connect(self._search.load)
+        self._search.search_requested.connect(self._ctrl.search_program)
+        self._search.navigate_requested.connect(self._ctrl.navigate_to_address)
 
     def _restore_all_panels(self) -> None:
         """Re-show dock widgets after the user closes them from the title bar."""
@@ -1486,6 +1499,10 @@ class MainWindow(QMainWindow):
                 f"Could not export the patched binary: {result.get('error', 'failed')}"
                 f"{chr(10) + hint if hint else ''}"
             )
+
+    def _focus_search(self) -> None:
+        self._tabs.setCurrentWidget(self._search)
+        self._search.focus_query()
 
     def _refresh_call_graph_root(self) -> None:
         """Re-root the call graph pane on the current address; it names the function itself."""

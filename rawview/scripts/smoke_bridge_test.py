@@ -165,6 +165,36 @@ def _check_engine(api: "GhidraAPI") -> list[str]:  # noqa: F821
     renamed = api.rename_function(addr, "rawview_smoke_renamed")
     check("rename_function", bool(renamed.get("ok")), renamed)
 
+    # One query across every listing, and the kind filter that narrows it.
+    found = api.search_program(target["name"][:6], limit_per_kind=5)
+    check(
+        "search_program",
+        found.get("count", 0) > 0 and all("kind" in h for h in found.get("results", [])),
+        {"count": found.get("count"), "kinds": sorted({h["kind"] for h in found.get("results", [])})},
+    )
+    only_strings = api.search_program("a", limit_per_kind=3, kinds="strings")
+    check(
+        "search_kind_filter",
+        all(h["kind"] == "string" for h in only_strings.get("results", [])),
+        f"{len(only_strings.get('results', []))} rows, all strings",
+    )
+    check(
+        "search_by_address",
+        any(h["kind"] == "address" for h in api.search_program(addr).get("results", [])),
+        addr,
+    )
+    check("search_empty_query", api.search_program("").get("error") == "empty_query", "rejected")
+
+    segments = api.list_segments()
+    check(
+        "list_segments",
+        bool(segments) and all({"start", "end", "execute"} <= set(s_) for s_ in segments),
+        f"{len(segments)} blocks",
+    )
+    data_items = api.list_data_items(0, 5)
+    check("list_data_items", data_items.get("count", 0) >= 0, data_items.get("count"))
+    check("list_namespaces", isinstance(api.list_namespaces(), list), len(api.list_namespaces()))
+
     # Patching: write bytes, see them in the patch list, put them back.
     before_dump = api.get_hex_dump(addr, 16, 16)
     patched = api.patch_bytes(addr, "90 90 90 90")

@@ -357,6 +357,58 @@ class GhidraAPI:
         raw = str(self.bridge.invoke_java(lambda ep: ep.setFunctionSignature(address, signature)))
         return json.loads(raw)
 
+    def search_program(
+        self, query: str, *, limit_per_kind: int = 50, kinds: str = ""
+    ) -> dict[str, Any]:
+        """
+        One substring search over functions, symbols, strings, imports, exports and data labels.
+
+        ``kinds`` narrows it to a comma-separated subset; empty means everything. The result is
+        ``{query, results, count, truncated}`` where each result carries ``kind``, ``address``,
+        ``name`` and ``detail``.
+        """
+        raw = str(
+            self.bridge.invoke_java(
+                lambda ep: ep.searchProgramJson(query, int(limit_per_kind), kinds)
+            )
+        )
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {"results": [], "count": 0}
+
+    def list_segments(self) -> list[dict[str, Any]]:
+        """Memory map: one row per block, with permissions."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.listSegmentsJson()))
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+
+    def list_namespaces(self) -> list[dict[str, str]]:
+        """Namespaces and classes defined in the program."""
+        return self._invoke_json_object_rows(lambda ep: ep.listNamespacesJson(), empty=[])
+
+    def list_data_items(self, offset: int = 0, limit: int = 500) -> dict[str, Any]:
+        """Defined, labelled data: globals, tables, structures."""
+        raw = str(
+            self.bridge.invoke_java(lambda ep: ep.listDataItemsJson(int(offset), int(limit)))
+        )
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {"rows": [], "count": 0}
+
+    def rename_data(self, address: str, new_name: str) -> dict[str, Any]:
+        """Rename (or create) the label at ``address``."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.renameDataJson(address, new_name)))
+        return json.loads(raw)
+
+    def set_local_variable_type(
+        self, function_address: str, variable_name: str, type_name: str
+    ) -> dict[str, Any]:
+        """Retype one local or parameter, as retyping it in the decompiler would."""
+        raw = str(
+            self.bridge.invoke_java(
+                lambda ep: ep.setLocalVariableTypeJson(function_address, variable_name, type_name)
+            )
+        )
+        return json.loads(raw)
+
     def patch_bytes(self, address: str, hex_bytes: str) -> dict[str, Any]:
         """Overwrite the bytes at ``address``. Returns the original and patched bytes as hex."""
         raw = str(self.bridge.invoke_java(lambda ep: ep.patchBytesJson(address, hex_bytes)))

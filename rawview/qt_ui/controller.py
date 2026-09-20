@@ -81,6 +81,7 @@ class RawViewQtController(QObject):
     patches_updated = Signal(object)  # dict from list_patches
     patch_applied = Signal(object)  # dict result of a patch, assemble or revert
     patch_export_finished = Signal(object)  # dict from export_patched_file
+    search_results_updated = Signal(object)  # dict from search_program
     bridge_prewarm_finished = Signal(bool, str)  # ok, message (NO_GHIDRA / BAD_GHIDRA / ...)
     session_restore_hints = Signal(object)  # dict: hex_dump_size, hex_dump_bpl (optional current_address)
     analysis_batch_changed = Signal(object)  # dict: paths, next_index, count, loaded_program
@@ -857,6 +858,26 @@ class RawViewQtController(QObject):
                 )
 
         threading.Thread(target=work, name="rawview-callgraph", daemon=True).start()
+
+    def search_program(self, query: str, kinds: str = "") -> None:
+        """Run one cross-program search. Walks every listing in the JVM, so it goes off-thread."""
+        if self._api is None:
+            self.search_results_updated.emit({"query": query, "results": [], "error": "no_program"})
+            return
+
+        def work() -> None:
+            try:
+                assert self._api is not None
+                self.search_results_updated.emit(
+                    self._api.search_program(query, limit_per_kind=100, kinds=kinds)
+                )
+            except Exception as e:
+                logger.exception("search")
+                self.search_results_updated.emit(
+                    {"query": query, "results": [], "error": str(e)[:300]}
+                )
+
+        threading.Thread(target=work, name="rawview-search", daemon=True).start()
 
     # -- patching ---------------------------------------------------------------------
     #
