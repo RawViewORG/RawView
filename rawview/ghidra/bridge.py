@@ -397,6 +397,27 @@ class GhidraBridgeController:
             resolved == root or root in resolved.parents for root in self._sandbox_visible_roots()
         )
 
+    def jvm_output_path(self, out_path: str) -> tuple[str, Path | None]:
+        """
+        Where the JVM should write ``out_path``, and the staged file to move afterwards.
+
+        The sandbox hides the user's directories on the way out as well as on the way in, and its
+        ``/tmp`` is an ephemeral tmpfs, so a JVM-side write to a path the user chose reports
+        success and leaves nothing behind. Writes that cannot land directly go to the project dir
+        and are moved into place by this process, which is not sandboxed.
+
+        Returns ``(path_for_the_jvm, staged_file_to_move)``; the second is None when the JVM can
+        write to the destination itself.
+        """
+        target = Path(out_path)
+        parent = target.parent if str(target.parent) else Path(".")
+        if self.path_visible_to_jvm(parent):
+            return out_path, None
+        staging = self.project_dir.resolve() / "exports"
+        staging.mkdir(parents=True, exist_ok=True)
+        staged = staging / f"{target.name}.{os.getpid()}.{time.time_ns()}"
+        return str(staged), staged
+
     def stage_path_for_jvm(self, path: str) -> str:
         """
         Return a path to ``path``'s contents that the JVM can actually open.

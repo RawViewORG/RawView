@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from rawview.ghidra.bridge import GhidraBridgeController
@@ -387,9 +389,30 @@ class GhidraAPI:
         return json.loads(raw)
 
     def export_patched_file(self, out_path: str) -> dict[str, Any]:
-        """Write the imported file back out with every patch applied."""
-        raw = str(self.bridge.invoke_java(lambda ep: ep.exportPatchedFileJson(out_path)))
-        return json.loads(raw)
+        """
+        Write the imported file back out with every patch applied.
+
+        The JVM may not be able to write where the user asked (the sandbox hides their
+        directories), in which case it writes into the project dir and the file is moved into
+        place here, where there is no sandbox to get in the way.
+        """
+        jvm_path, staged = self.bridge.jvm_output_path(out_path)
+        raw = str(self.bridge.invoke_java(lambda ep: ep.exportPatchedFileJson(jvm_path)))
+        result = json.loads(raw)
+        if staged is None:
+            return result
+        if not result.get("ok"):
+            staged.unlink(missing_ok=True)
+            return result
+        try:
+            destination = Path(out_path)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(staged), str(destination))
+            result["path"] = str(destination.resolve())
+        except OSError as e:
+            staged.unlink(missing_ok=True)
+            return {"error": "write_failed", "hint": str(e)[:300], "path": out_path}
+        return result
 
     def close_all(self) -> None:
         self.bridge.invoke_java(lambda ep: ep.closeAll())
