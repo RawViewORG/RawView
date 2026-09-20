@@ -49,6 +49,7 @@ def _build_registry(
     on_navigate: Callable[[str], None],
     emit_fn: Callable[[str, dict[str, Any]], None] | None = None,
     batch_port: AgentBatchToolPort | None = None,
+    current_address_fn: Callable[[], str] | None = None,
 ) -> dict[str, RegisteredTool]:
     def append_work_markdown(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
         md = str(inp.get("markdown", ""))
@@ -283,6 +284,116 @@ def _build_registry(
     def get_control_flow_graph(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
         return json.dumps(api.get_control_flow_graph(str(inp["address"])))
 
+    def get_function_at(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(api.get_function_at(str(inp["address"])))
+
+    def get_call_graph(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(
+            api.get_call_graph(
+                str(inp["address"]),
+                depth=int(inp.get("depth", 2) or 2),
+                direction=str(inp.get("direction", "both") or "both"),
+            )
+        )
+
+    def search_program(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(
+            api.search_program(
+                str(inp["query"]),
+                limit_per_kind=int(inp.get("limit_per_kind", 25) or 25),
+                kinds=str(inp.get("kinds", "") or ""),
+            )
+        )
+
+    def list_segments(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        rows = api.list_segments()
+        return json.dumps({"segments": rows, "count": len(rows)})
+
+    def list_namespaces(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        rows = api.list_namespaces()
+        return json.dumps({"namespaces": rows, "count": len(rows)})
+
+    def list_data_items(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(
+            api.list_data_items(int(inp.get("offset", 0) or 0), int(inp.get("limit", 200) or 200))
+        )
+
+    def rename_data(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        res = api.rename_data(str(inp["address"]), str(inp["new_name"]))
+        if emit_fn is not None and res.get("ok"):
+            emit_fn("ghidra_shell_refresh", {})
+        return json.dumps(res)
+
+    def set_local_variable_type(
+        inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]
+    ) -> str:
+        return json.dumps(
+            api.set_local_variable_type(
+                str(inp["function_address"]), str(inp["variable_name"]), str(inp["type"])
+            )
+        )
+
+    def patch_bytes(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        res = api.patch_bytes(str(inp["address"]), str(inp["bytes"]))
+        if emit_fn is not None and res.get("ok"):
+            emit_fn("ghidra_shell_refresh", {})
+        return json.dumps(res)
+
+    def assemble_instruction(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        apply_it = inp.get("apply", False)
+        if isinstance(apply_it, str):
+            apply_it = apply_it.strip().lower() in ("1", "true", "yes", "on")
+        res = api.assemble_instruction(
+            str(inp["address"]), str(inp["instruction"]), apply=bool(apply_it)
+        )
+        if emit_fn is not None and res.get("applied"):
+            emit_fn("ghidra_shell_refresh", {})
+        return json.dumps(res)
+
+    def list_patches(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(api.list_patches())
+
+    def revert_patch(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        res = api.revert_patch(str(inp["address"]), int(inp.get("length", 0) or 0))
+        if emit_fn is not None and res.get("ok"):
+            emit_fn("ghidra_shell_refresh", {})
+        return json.dumps(res)
+
+    def export_patched_file(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(api.export_patched_file(str(inp["path"])))
+
+    def compare_binary(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        """Import, analyze and diff in one call: three round trips the model should not have to make."""
+        opened = api.open_comparison_file(str(inp["path"]))
+        if not opened.get("ok"):
+            return json.dumps(opened)
+        analyze = inp.get("analyze", True)
+        if isinstance(analyze, str):
+            analyze = analyze.strip().lower() in ("1", "true", "yes", "on")
+        if analyze:
+            analyzed = api.analyze_comparison_program()
+            if not analyzed.get("ok"):
+                return json.dumps(analyzed)
+        out = api.diff_programs(int(inp.get("limit", 100) or 100))
+        out["compared_with"] = opened.get("name", "")
+        return json.dumps(out)
+
+    def close_comparison(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(api.close_comparison_program())
+
+    def get_current_address(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        """Where the user is looking. RawView runs inside the window, so this is the real selection."""
+        address = current_address_fn() if current_address_fn is not None else ""
+        return json.dumps({"address": address})
+
+    def get_current_function(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        address = current_address_fn() if current_address_fn is not None else ""
+        if not address:
+            return json.dumps({"error": "no_current_address"})
+        out = api.get_function_at(address)
+        out["current_address"] = address
+        return json.dumps(out)
+
     def read_agent_memory(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
         max_c = int(inp.get("max_chars", 32000) or 32000)
         max_c = max(256, min(max_c, 200_000))
@@ -332,7 +443,7 @@ def _build_registry(
                 results.append({"index": i, "error": "missing_tool_name"})
                 continue
             try:
-                out = run_tool(n, sub, api, nav, emit_fn, batch_port)
+                out = run_tool(n, sub, api, nav, emit_fn, batch_port, current_address_fn)
                 results.append({"index": i, "name": n, "result": out})
             except Exception as e:
                 results.append({"index": i, "name": n, "error": str(e)})
@@ -872,6 +983,255 @@ def _build_registry(
             handler=web_search,
         ),
         RegisteredTool(
+            name="get_function_at",
+            description=(
+                "Resolve `address` to the function containing it: name, entry point, signature, size, "
+                "calling convention. Use when you hold an address from a string xref, a call target or "
+                "the user and need to know what function it is in."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {"address": {"type": "string", "description": "Any address inside a function."}},
+                "required": ["address"],
+            },
+            handler=get_function_at,
+        ),
+        RegisteredTool(
+            name="get_call_graph",
+            description=(
+                "Callers and/or callees of the function at `address`, walked `depth` levels. "
+                "`direction` is callers, callees or both (default both). Edges always point caller -> "
+                "callee. Prefer this over reading xrefs by hand to answer 'what reaches this code'. "
+                "Large graphs are capped and report truncated."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "Function entry or any address inside it."},
+                    "depth": {"type": "integer", "description": "Levels to walk, 1-5 (default 2)."},
+                    "direction": {
+                        "type": "string",
+                        "description": "callers, callees, or both (default).",
+                    },
+                },
+                "required": ["address"],
+            },
+            handler=get_call_graph,
+        ),
+        RegisteredTool(
+            name="search_program",
+            description=(
+                "One case-insensitive substring search across functions, symbols, strings, imports, "
+                "exports and data labels. `kinds` narrows it (comma-separated subset of "
+                "functions,symbols,strings,imports,exports,data); empty searches everything. A query "
+                "that parses as an address also returns an address hit. Use this instead of listing a "
+                "whole category and filtering yourself."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Substring to look for."},
+                    "kinds": {"type": "string", "description": "Comma-separated kinds, or empty for all."},
+                    "limit_per_kind": {
+                        "type": "integer",
+                        "description": "Max hits per kind (default 25, hard max 200).",
+                    },
+                },
+                "required": ["query"],
+            },
+            handler=search_program,
+        ),
+        RegisteredTool(
+            name="list_segments",
+            description=(
+                "Memory map: every block with start, end, size, permissions and whether it holds bytes. "
+                "Use to tell code from data, spot RWX blocks, or check whether an address is mapped."
+            ),
+            parameters_schema={"type": "object", "properties": {}},
+            handler=list_segments,
+        ),
+        RegisteredTool(
+            name="list_namespaces",
+            description="Namespaces and classes defined in the program (C++ classes, external libraries).",
+            parameters_schema={"type": "object", "properties": {}},
+            handler=list_namespaces,
+        ),
+        RegisteredTool(
+            name="list_data_items",
+            description=(
+                "Defined, labelled data: globals, tables and structures with their type and value. "
+                "Paged through `offset`/`limit`."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "offset": {"type": "integer", "description": "Rows to skip (default 0)."},
+                    "limit": {"type": "integer", "description": "Rows to return (default 200, max 5000)."},
+                },
+            },
+            handler=list_data_items,
+        ),
+        RegisteredTool(
+            name="rename_data",
+            description=(
+                "Rename (or create) the label at `address`. For data and globals; use rename_function "
+                "for a function entry point."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "Address of the data item."},
+                    "new_name": {"type": "string", "description": "New label."},
+                },
+                "required": ["address", "new_name"],
+            },
+            handler=rename_data,
+        ),
+        RegisteredTool(
+            name="set_local_variable_type",
+            description=(
+                "Retype one local or parameter of a function, as retyping it in the decompiler would. "
+                "Ghidra refuses a type whose size does not fit the variable's storage; that comes back "
+                "as error type_rejected with the reason, not as a failure to act on."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "function_address": {"type": "string", "description": "Function entry address."},
+                    "variable_name": {"type": "string", "description": "Variable as the decompiler names it."},
+                    "type": {"type": "string", "description": "C type, e.g. 'char *' or 'unsigned int'."},
+                },
+                "required": ["function_address", "variable_name", "type"],
+            },
+            handler=set_local_variable_type,
+        ),
+        RegisteredTool(
+            name="assemble_instruction",
+            description=(
+                "Assemble one instruction for `address`. Defaults to a dry run that writes nothing and "
+                "reports the encoding, its length, the length of the instruction it would replace, and "
+                "`overruns` when the new one is longer and would overwrite the next instruction. Pass "
+                "apply=true to write it. Always dry-run first and check overruns before applying."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "Where the instruction goes."},
+                    "instruction": {"type": "string", "description": "Assembly, e.g. 'MOV EAX,0x1' or 'NOP'."},
+                    "apply": {
+                        "type": "boolean",
+                        "description": "Write it (default false, which only reports what would be written).",
+                    },
+                },
+                "required": ["address", "instruction"],
+            },
+            handler=assemble_instruction,
+        ),
+        RegisteredTool(
+            name="patch_bytes",
+            description=(
+                "Overwrite the bytes at `address` with hex `bytes`. Modifies the program: say what you "
+                "are patching and why before calling it, and prefer assemble_instruction when you mean "
+                "an instruction rather than raw bytes. Returns the original bytes, which revert_patch "
+                "can restore."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "Address to write at."},
+                    "bytes": {"type": "string", "description": "Hex, e.g. '90 90' or '9090'."},
+                },
+                "required": ["address", "bytes"],
+            },
+            handler=patch_bytes,
+        ),
+        RegisteredTool(
+            name="list_patches",
+            description=(
+                "Every byte run that differs from the file the program was imported from, with the "
+                "original and current bytes. Read back from the program, so it includes patches made "
+                "by the user. Relocations Ghidra applied at import are excluded."
+            ),
+            parameters_schema={"type": "object", "properties": {}},
+            handler=list_patches,
+        ),
+        RegisteredTool(
+            name="revert_patch",
+            description=(
+                "Restore the original file bytes at `address`. `length` 0 (the default) reverts the "
+                "whole changed run starting there, which is what list_patches reports."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "Start of the patched run."},
+                    "length": {"type": "integer", "description": "Bytes to revert, or 0 for the whole run."},
+                },
+                "required": ["address"],
+            },
+            handler=revert_patch,
+        ),
+        RegisteredTool(
+            name="export_patched_file",
+            description=(
+                "Write the imported file back out to `path` with every patch applied, preserving "
+                "headers and unmapped regions so the result still runs. Writes a file to disk: only "
+                "call it when the user asked for a patched binary, and tell them where it went."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {"path": {"type": "string", "description": "Destination file path."}},
+                "required": ["path"],
+            },
+            handler=export_patched_file,
+        ),
+        RegisteredTool(
+            name="compare_binary",
+            description=(
+                "Import the binary at `path` beside the loaded program, analyze it, and report which "
+                "functions are identical, changed, only here, or only there, with instruction-count "
+                "deltas. Matching survives rebasing, and changed constants do count as a change. Use "
+                "for variant analysis: what is new or different in this sample versus the known one."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Second binary to compare against."},
+                    "analyze": {
+                        "type": "boolean",
+                        "description": "Auto-analyze the second binary first (default true; needed for a useful diff).",
+                    },
+                    "limit": {"type": "integer", "description": "Max rows per category (default 100)."},
+                },
+                "required": ["path"],
+            },
+            handler=compare_binary,
+        ),
+        RegisteredTool(
+            name="close_comparison",
+            description="Drop the comparison binary opened by compare_binary and free its memory.",
+            parameters_schema={"type": "object", "properties": {}},
+            handler=close_comparison,
+        ),
+        RegisteredTool(
+            name="get_current_address",
+            description=(
+                "The address the user is currently looking at in RawView. Use it when they say 'this "
+                "function', 'here' or 'the current address' instead of guessing or asking."
+            ),
+            parameters_schema={"type": "object", "properties": {}},
+            handler=get_current_address,
+        ),
+        RegisteredTool(
+            name="get_current_function",
+            description=(
+                "The function containing the address the user is looking at, with its name and "
+                "signature. The direct answer to 'what is this function doing'."
+            ),
+            parameters_schema={"type": "object", "properties": {}},
+            handler=get_current_function,
+        ),
+        RegisteredTool(
             name="batch_run_tools",
             description=(
                 "Run multiple tools in one assistant turn to save tokens. Provide an array of {name, input} calls. "
@@ -922,8 +1282,10 @@ def _build_registry(
 def anthropic_tool_list(
     on_navigate: Callable[[str], None],
     batch_port: AgentBatchToolPort | None = None,
+    current_address_fn: Callable[[], str] | None = None,
 ) -> list[dict[str, Any]]:
-    return [t.anthropic_schema() for t in _build_registry(on_navigate, None, batch_port).values()]
+    registry = _build_registry(on_navigate, None, batch_port, current_address_fn)
+    return [t.anthropic_schema() for t in registry.values()]
 
 
 def run_tool(
@@ -933,8 +1295,9 @@ def run_tool(
     on_navigate: Callable[[str], None],
     emit: Callable[[str, dict[str, Any]], None] | None = None,
     batch_port: AgentBatchToolPort | None = None,
+    current_address_fn: Callable[[], str] | None = None,
 ) -> str:
-    reg = _build_registry(on_navigate, emit, batch_port)
+    reg = _build_registry(on_navigate, emit, batch_port, current_address_fn)
     if name not in reg:
         return json.dumps({"error": f"unknown_tool:{name}"})
     if isinstance(arguments_json, str):

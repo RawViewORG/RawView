@@ -630,6 +630,7 @@ class RawViewQtController(QObject):
                     memory=self.agent_memory,
                     max_turns=self.settings.agent_max_turns,
                     on_navigate=self.navigate_to_address,
+                    current_address_fn=lambda: self._current_address,
                     emit=emit,
                     batch_port=batch_port,
                 )

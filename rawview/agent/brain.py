@@ -111,6 +111,7 @@ class AgentBrain:
         on_navigate: Callable[[str], None],
         emit: EmitFn,
         batch_port: AgentBatchToolPort | None = None,
+        current_address_fn: Callable[[], str] | None = None,
     ) -> None:
         self._provider = provider
         self._ghidra = ghidra_api
@@ -119,6 +120,8 @@ class AgentBrain:
         self._on_navigate = on_navigate
         self._emit = emit
         self._batch_port = batch_port
+        # Lets the agent answer "what am I looking at" from the UI rather than guessing.
+        self._current_address_fn = current_address_fn
         self._interrupt = threading.Event()
 
     @property
@@ -222,6 +225,11 @@ __TOOL_PROTOCOL__
 - **`get_exports`**: The image's exported symbols (PE export directory / ELF dynamic symbols), each with `type` function or data.
 - **`get_entry_points`**: Where execution starts (`entry`, `_start`, `main`, `DllMain`, …), falling back to entry-point functions and then the image base.
 - **`list_work_notes`**: List Markdown files in the Work dock folder.
+- **`get_current_address`** / **`get_current_function`**: Where the user is actually looking in RawView, and the function containing it. Use these when they say "this function", "here" or "the current address" rather than guessing or asking them to repeat an address.
+- **`list_segments`**: Memory map - every block with permissions and whether it holds bytes. Tells code from data and shows whether an address is even mapped.
+- **`list_namespaces`**: Namespaces and classes (C++ classes, external libraries).
+- **`list_patches`**: Byte runs that differ from the file on disk, with original and current bytes.
+- **`close_comparison`**: Drop the binary opened by `compare_binary`.
 
 ### Tools with parameters (name, purpose, `input` keys)
 - **`list_functions`**: Functions with entry address, `size`, `is_thunk`, `is_external` and current `signature`. `input`: optional `limit`, `offset`, `name_contains` (see schema). Filtering happens inside Ghidra, so `name_contains` is cheap even on huge images; `matched_after_name_filter` tells you how many rows exist beyond the window.
@@ -242,6 +250,17 @@ __TOOL_PROTOCOL__
 - **`create_struct`**: Define a C type (struct, typedef, enum) in the program and optionally lay it down at an address. `input`: `struct_definition` (real C text, e.g. `struct Hdr { int magic; char name[8]; void *next; };`); optional `address` (empty string defines the type without applying it).
 - **`set_function_signature`**: Set the prototype (return type, parameter names/types, calling convention). Usually the highest-leverage edit you can make - it improves the decompiled output of this function and its callers. `input`: `address`, `signature` (e.g. `int parse(char *buf, size_t len)`).
 - **`get_control_flow_graph`**: CFG metadata for a function. `input`: `address` (string).
+- **`get_function_at`**: Resolve any address to the function containing it (name, entry, signature, size). `input`: `address` (string). Use it before assuming an address is a function entry.
+- **`get_call_graph`**: Callers and/or callees around a function. `input`: `address` (string); optional `depth` (1-5, default 2), `direction` (`callers`, `callees`, `both`). Edges always point caller -> callee. Prefer this over walking `get_xrefs_to` by hand; big graphs come back capped with `truncated` set.
+- **`search_program`**: One substring search across functions, symbols, strings, imports, exports and data. `input`: `query` (string); optional `kinds` (comma-separated subset), `limit_per_kind`. Reach for this before listing a whole category and filtering yourself.
+- **`list_data_items`**: Labelled data with type and value. `input`: optional `offset`, `limit`.
+- **`rename_data`**: Rename or create the label at an address (data and globals; use `rename_function` for a function entry). `input`: `address`, `new_name`.
+- **`set_local_variable_type`**: Retype a local or parameter, like retyping it in the decompiler. `input`: `function_address`, `variable_name`, `type` (C type text). Ghidra refuses a type that does not fit the variable's storage; that is a `type_rejected` answer with the reason, not a failure to try.
+- **`assemble_instruction`**: Assemble one instruction. `input`: `address`, `instruction`; optional `apply` (default **false**). The dry run reports the encoding, its length, the length of the instruction it replaces, and `overruns` when the new one is longer and would clobber the next instruction. Always dry-run and check `overruns` before applying.
+- **`patch_bytes`**: Overwrite bytes at an address. `input`: `address`, `bytes` (hex). Returns the original bytes so `revert_patch` can undo it.
+- **`revert_patch`**: Restore the original file bytes. `input`: `address`; optional `length` (0 = the whole changed run).
+- **`export_patched_file`**: Write the binary back out with the patches applied. `input`: `path` (string).
+- **`compare_binary`**: Import, analyze and diff a second binary against the loaded one in a single call. `input`: `path`; optional `analyze` (default true), `limit`. Reports identical / changed / only-here / only-there functions with instruction deltas. Matching survives rebasing, and a changed constant does count as a change, which is what makes it useful across malware builds.
 - **`read_work_markdown`**: Read one Work-dock note. `input`: `filename` and/or `note` (string); optional `max_chars` (integer).
 - **`append_work_markdown`**: Append to a Work-dock note. `input`: `markdown` (string, required); optional `tab_title` (string).
 - **`read_agent_memory`**: Read persistent agent memory file. `input`: optional `max_chars` (integer) only; `{}` is valid.
@@ -254,6 +273,9 @@ __TOOL_PROTOCOL__
 - **`open_file`**: new path on disk; defaults to full auto-analysis unless `run_auto_analysis` is false. Not for "refresh the listing" of an already loaded program.
 - **`run_auto_analysis`**: only the loaded program; if the user asks to analyze/re-analyze you **must** call this or `open_file`, never only describe doing so.
 - **`navigate_to`**: UI only; does not change analysis.
+- **Patching** (`patch_bytes`, `assemble_instruction` with `apply`, `revert_patch`): these change the program. Say what you are about to patch and why before doing it, prefer `assemble_instruction` over raw bytes when you mean an instruction, and dry-run first.
+- **`export_patched_file`** writes a file to the user's disk. Only when they asked for a patched binary, and tell them where it landed.
+- **`compare_binary`** holds a second program in memory; call `close_comparison` when the comparison is done.
 - **`user_tip`**: rare UX hints - not where normal analysis belongs.
 
 ## Communication
@@ -263,7 +285,9 @@ __TOOL_PROTOCOL__
 """.strip()
 
         # Build tools list with cache_control on the last entry (caches tools + system together).
-        tools_raw = anthropic_tool_list(self._on_navigate, self._batch_port)
+        tools_raw = anthropic_tool_list(
+            self._on_navigate, self._batch_port, self._current_address_fn
+        )
         if tools_raw:
             tools_cached = list(tools_raw)
             last_tool = dict(tools_cached[-1])
@@ -332,6 +356,7 @@ __TOOL_PROTOCOL__
                             self._on_navigate,
                             self._emit,
                             self._batch_port,
+                            self._current_address_fn,
                         )
                     except Exception as e:
                         logger.exception("Tool %s failed", call.name)
