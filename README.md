@@ -102,6 +102,30 @@ xattr -dr com.apple.quarantine /Applications/RawView.app
 The Ghidra JVM sandbox is Linux-only (bubblewrap builds on Linux namespaces), so macOS runs the JVM
 unsandboxed, the same as Windows.
 
+## Use it from Claude Code (no API key)
+
+The in-app agent needs an Anthropic API key. If you already pay for Claude Code, Claude Desktop or
+another MCP client, you can skip the key entirely and let that client drive RawView instead: the
+model comes from your subscription, RawView supplies the reverse engineering.
+
+1. In RawView: **File -> Settings -> Allow MCP clients to drive RawView**.
+2. Register it once (the Settings page shows the exact command for your install):
+
+```bash
+claude mcp add rawview -- rawview-mcp
+```
+
+3. Leave RawView open and ask Claude Code about the binary you have loaded.
+
+All 48 tools are exposed: decompile, disassemble, strings, xrefs, call graph, search, patching,
+binary diff, renaming and retyping. Because it drives the window you are already looking at rather
+than a second headless copy of Ghidra, "what is this function doing" works without you pasting an
+address, and anything it renames or navigates to appears in front of you.
+
+The endpoint listens on loopback only, refuses requests carrying a browser `Origin` header, and
+requires the bearer token RawView writes to `mcp.json` (mode 0600) in your user data directory. It
+is off until you turn it on.
+
 ## Repository layout
 
 | Path | Purpose |

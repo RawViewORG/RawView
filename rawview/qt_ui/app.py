@@ -44,6 +44,8 @@ def run_qt_app(*, no_agent: bool = False) -> int:
 
     win = MainWindow(no_agent=no_agent)
     win.hide()
+    # Off unless the user turned it on; publishes mcp.json for `rawview-mcp` when they have.
+    win.controller.start_mcp_endpoint()
 
     splash._boot_mode = "initial"  # type: ignore[attr-defined]
 

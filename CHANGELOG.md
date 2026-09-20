@@ -30,6 +30,24 @@ in the sandbox's ephemeral tmpfs, so exporting a file reported success and left 
 behind. Those writes now go through the project directory and are moved into place by
 RawView itself.
 
+### Use RawView from Claude Code, without an API key
+
+The in-app agent needs an Anthropic API key, which is a real barrier for anyone who already pays
+for Claude Code or Claude Desktop. RawView now speaks MCP, so those clients can drive it with
+their own model: `claude mcp add rawview -- rawview-mcp`, then ask about the binary you have open.
+All 48 tools are exposed.
+
+It drives the *running window* rather than starting a second headless Ghidra, which is the whole
+point: `get_current_function` answers about the function you are looking at, and a rename or a
+navigation shows up in front of you. A detached server would have its own JVM, its own program,
+and no idea what you are doing.
+
+Off until enabled under File -> Settings. It listens on loopback only, requires the bearer token
+written to `mcp.json` (0600) in the user data directory, and refuses any request carrying a
+browser `Origin` header, since a DNS-rebinding page could otherwise reach a loopback service
+through the victim's own browser. The protocol is implemented directly over stdio, so the packaged
+app gains no dependency for it.
+
 ### Call graph
 
 A new tab showing callers and callees of the current function as two trees, expanded one

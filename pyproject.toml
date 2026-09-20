@@ -34,6 +34,7 @@ discord = ["pypresence>=4.3.0"]
 [project.scripts]
 rawview = "rawview.main:main"
 rawview-re = "rawview.main:main_re"
+rawview-mcp = "rawview.mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

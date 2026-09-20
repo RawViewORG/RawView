@@ -1174,6 +1174,11 @@ class MainWindow(QMainWindow):
         self._diff.compare_requested.connect(self._choose_comparison_binary)
         self._diff.close_comparison_requested.connect(self._close_comparison)
 
+    @property
+    def controller(self) -> RawViewQtController:
+        """The controller, for app-level wiring such as the MCP endpoint."""
+        return self._ctrl
+
     def _restore_all_panels(self) -> None:
         """Re-show dock widgets after the user closes them from the title bar."""
         for dock in self._main_docks():
@@ -2059,6 +2064,9 @@ class MainWindow(QMainWindow):
         self._ctrl.mark_re_recovery_clean_shutdown()
         self._work_panel.mark_clean_shutdown()
         self._persist_ui_layout()
+        # Before the bridge: an MCP client mid-call would otherwise reach a dead JVM, and the
+        # config file must not outlive the port it points at.
+        self._ctrl.stop_mcp_endpoint()
         self._ctrl.shutdown_bridge()
         self._discord.close()
         super().closeEvent(event)

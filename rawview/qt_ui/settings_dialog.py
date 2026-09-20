@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import sys
 import threading
 from pathlib import Path
 
@@ -163,6 +165,20 @@ class SettingsDialog(QDialog):
         self._searxng_url = QLineEdit()
         self._searxng_url.setPlaceholderText("http://localhost:8888")
         self._searxng_url.setToolTip("Base URL of a SearXNG instance with the JSON format enabled.")
+
+        self._mcp_enabled = QCheckBox("Allow MCP clients to drive RawView")
+        self._mcp_enabled.setToolTip(
+            "Lets Claude Code, Claude Desktop or any other MCP client use RawView's Ghidra tools "
+            "on the binary you have open. No Anthropic API key needed: the model comes from that "
+            "client's own subscription. Listens on loopback only, and a client must present the "
+            "token RawView writes to mcp.json in your user data directory."
+        )
+        self._mcp_port = QSpinBox()
+        self._mcp_port.setRange(0, 65535)
+        self._mcp_port.setToolTip("0 lets the OS pick a free port, which is the usual choice.")
+        self._mcp_hint = QLabel("")
+        self._mcp_hint.setWordWrap(True)
+        self._mcp_hint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._model = QComboBox()
         self._model.setEditable(True)
         self._model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -302,6 +318,12 @@ class SettingsDialog(QDialog):
         af.addRow("WormT SafeWriggle", self._wormt_safe)
         af.addRow("Brave Search API key", self._brave_key)
         af.addRow("SearXNG URL", self._searxng_url)
+        _mcp_head = QLabel("<b>MCP (use RawView from Claude Code, without an API key)</b>")
+        _mcp_head.setTextFormat(Qt.TextFormat.RichText)
+        af.addRow(_mcp_head)
+        af.addRow("", self._mcp_enabled)
+        af.addRow("MCP port", self._mcp_port)
+        af.addRow("", self._mcp_hint)
         self._agent_form_block.setVisible(controller.agent_enabled)
         if not controller.agent_enabled:
             self._no_agent_note = QLabel(
@@ -423,6 +445,21 @@ class SettingsDialog(QDialog):
         save_shortcut_map(self._ui_state, out)
         return True
 
+    def _refresh_mcp_hint(self) -> None:
+        """Show the exact command to register this with Claude Code, or why it is not available."""
+        if not self._mcp_enabled.isChecked():
+            self._mcp_hint.setText(
+                "Off. Turn this on to drive RawView from Claude Code or another MCP client using "
+                "that client's own model, instead of an Anthropic API key here."
+            )
+            return
+        launcher = _rawview_mcp_launcher()
+        self._mcp_hint.setText(
+            "Register it once with Claude Code by running:\n\n"
+            f"    claude mcp add rawview -- {launcher}\n\n"
+            "Then ask Claude Code about the binary you have open here. RawView must be running."
+        )
+
     def _load_from_settings(self, s: Settings) -> None:
         if s.ghidra_install_dir:
             self._ghidra_dir.setText(str(s.ghidra_install_dir))
@@ -454,6 +491,10 @@ class SettingsDialog(QDialog):
         self._wormt_safe.setCurrentIndex(_ssidx if _ssidx >= 0 else 0)
         self._brave_key.setText(s.brave_search_api_key)
         self._searxng_url.setText(s.searxng_url)
+        self._mcp_enabled.setChecked(bool(s.rawview_mcp_enabled))
+        self._mcp_port.setValue(int(s.rawview_mcp_port))
+        self._mcp_enabled.toggled.connect(self._refresh_mcp_hint)
+        self._refresh_mcp_hint()
         self._max_turns.setValue(s.agent_max_turns)
         self._hist.setValue(s.agent_history_messages)
         self._agent_temp.setValue(float(s.agent_temperature))
@@ -714,9 +755,27 @@ class SettingsDialog(QDialog):
             data["WORMT_SAFE_SEARCH"] = str(self._wormt_safe.currentData() or "mid")
             data["BRAVE_SEARCH_API_KEY"] = self._brave_key.text().strip()
             data["SEARXNG_URL"] = self._searxng_url.text().strip()
+        data["RAWVIEW_MCP_ENABLED"] = "true" if self._mcp_enabled.isChecked() else "false"
+        data["RAWVIEW_MCP_PORT"] = str(self._mcp_port.value())
         save_user_settings_file(data)
         self._ctrl.reload_settings()
         self.accept()
+
+
+def _rawview_mcp_launcher() -> str:
+    """
+    The command line that starts the MCP server for this installation.
+
+    A pip install puts ``rawview-mcp`` on PATH. A packaged build has no console scripts and no
+    system Python, so it names this executable instead, which re-enters the MCP server through the
+    --mcp flag rather than opening a window.
+    """
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --mcp'
+    script = shutil.which("rawview-mcp")
+    if script:
+        return script
+    return f'"{sys.executable}" -m rawview.mcp.server'
 
 
 def open_settings_dialog(parent, controller: RawViewQtController) -> bool:

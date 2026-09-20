@@ -157,6 +157,12 @@ class Settings(BaseSettings):
         validation_alias="AGENT_TEMPERATURE",
     )
 
+    # Lets Claude Code, Claude Desktop or any other MCP client drive this RawView window through
+    # `rawview-mcp`, so the agent tools can be used without an Anthropic API key of one's own.
+    rawview_mcp_enabled: bool = Field(default=False, validation_alias="RAWVIEW_MCP_ENABLED")
+    # 0 asks the OS for a free port, which is written to mcp.json for the client to find.
+    rawview_mcp_port: int = Field(default=0, validation_alias="RAWVIEW_MCP_PORT")
+
     # Agent web search. "auto" picks the first provider that is configured, ending at DuckDuckGo,
     # which needs no setup. Any other value names the provider to try first.
     search_provider: str = Field(default="auto", validation_alias="RAWVIEW_SEARCH_PROVIDER")

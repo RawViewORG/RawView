@@ -84,6 +84,7 @@ class RawViewQtController(QObject):
     search_results_updated = Signal(object)  # dict from search_program
     diff_progress = Signal(str)  # human-readable step while a comparison is being prepared
     diff_updated = Signal(object)  # dict from diff_programs
+    mcp_state_changed = Signal(object)  # dict: running, port, error
     bridge_prewarm_finished = Signal(bool, str)  # ok, message (NO_GHIDRA / BAD_GHIDRA / ...)
     session_restore_hints = Signal(object)  # dict: hex_dump_size, hex_dump_bpl (optional current_address)
     analysis_batch_changed = Signal(object)  # dict: paths, next_index, count, loaded_program
@@ -100,6 +101,7 @@ class RawViewQtController(QObject):
         self._hex_dump_bpl: int = 16
         self.agent_memory = ConversationMemory(max_messages=self.settings.agent_history_messages)
         self._brain: AgentBrain | None = None
+        self._mcp_endpoint: Any = None
         self._agent_thread: threading.Thread | None = None
         self._agent_start_lock = threading.Lock()
         self._agent_stop_event = threading.Event()
@@ -121,6 +123,7 @@ class RawViewQtController(QObject):
             self.shutdown_bridge()
         if self.agent_enabled:
             self.agent_memory = ConversationMemory(max_messages=self.settings.agent_history_messages)
+        self.start_mcp_endpoint()
 
     def prewarm_bridge_if_enabled(self) -> None:
         """Start Ghidra JVM on startup when configured (runs in a background thread)."""
@@ -613,11 +616,7 @@ class RawViewQtController(QObject):
                 except Exception as e:
                     self.agent_event.emit("agent_error", {"message": str(e)})
                     return
-                batch_port = AgentBatchToolPort(
-                    status_json=self.agent_batch_status_json,
-                    open_index_json=self.agent_batch_open_index,
-                    open_next_json=self.agent_batch_open_next,
-                )
+                batch_port = self._agent_batch_port()
                 goal = self.pinned_goal_for_analysis_batch()
                 try:
                     provider = build_provider(self.settings)
@@ -881,6 +880,88 @@ class RawViewQtController(QObject):
                 )
 
         threading.Thread(target=work, name="rawview-search", daemon=True).start()
+
+    # -- MCP endpoint -----------------------------------------------------------------
+
+    def _agent_batch_port(self) -> AgentBatchToolPort:
+        return AgentBatchToolPort(
+            status_json=self.agent_batch_status_json,
+            open_index_json=self.agent_batch_open_index,
+            open_next_json=self.agent_batch_open_next,
+        )
+
+    def _mcp_list_tools(self) -> list[dict[str, Any]]:
+        from rawview.agent.tools import anthropic_tool_list
+
+        return anthropic_tool_list(
+            self.navigate_to_address, self._agent_batch_port(), lambda: self._current_address
+        )
+
+    def _mcp_call_tool(self, name: str, arguments: dict[str, Any]) -> str:
+        """
+        Run one tool for an MCP client.
+
+        The bridge is started on demand, exactly as it is for the in-app agent: a client that
+        connects before a binary has been opened should be able to call open_file, not be told to
+        go and click something first.
+        """
+        from rawview.agent.tools import run_tool
+
+        self._ensure_bridge()
+        assert self._api is not None
+        return run_tool(
+            name,
+            arguments,
+            self._api,
+            self.navigate_to_address,
+            lambda kind, payload: self.agent_event.emit(kind, payload),
+            self._agent_batch_port(),
+            lambda: self._current_address,
+        )
+
+    def _mcp_status(self) -> dict[str, Any]:
+        return {
+            "program": self._active_program,
+            "current_address": self._current_address,
+            "bridge": self._bridge.state.value if self._bridge is not None else "stopped",
+        }
+
+    def start_mcp_endpoint(self) -> None:
+        """Begin accepting MCP clients, if the user turned that on."""
+        if not self.settings.rawview_mcp_enabled:
+            self.stop_mcp_endpoint()
+            return
+        if self._mcp_endpoint is not None and self._mcp_endpoint.running:
+            return
+        from rawview.mcp.endpoint import RawViewMcpEndpoint
+
+        try:
+            endpoint = RawViewMcpEndpoint(
+                list_tools=self._mcp_list_tools,
+                call_tool=self._mcp_call_tool,
+                status=self._mcp_status,
+                port=self.settings.rawview_mcp_port,
+            )
+            port = endpoint.start()
+        except Exception as e:
+            logger.exception("MCP endpoint")
+            self._mcp_endpoint = None
+            self.mcp_state_changed.emit({"running": False, "error": str(e)[:300]})
+            return
+        self._mcp_endpoint = endpoint
+        self.mcp_state_changed.emit({"running": True, "port": port})
+        self.status_message.emit(f"MCP clients can now drive RawView (127.0.0.1:{port}).")
+
+    def stop_mcp_endpoint(self) -> None:
+        if self._mcp_endpoint is None:
+            return
+        self._mcp_endpoint.stop()
+        self._mcp_endpoint = None
+        self.mcp_state_changed.emit({"running": False})
+
+    @property
+    def mcp_port(self) -> int:
+        return self._mcp_endpoint.port if self._mcp_endpoint is not None else 0
 
     def compare_with_binary(self, path: str) -> None:
         """
