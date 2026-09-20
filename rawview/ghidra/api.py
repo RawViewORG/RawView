@@ -87,7 +87,10 @@ class GhidraAPI:
         return str(self.bridge.invoke_java(lambda ep: ep.ping()))
 
     def open_file(self, path: str) -> str:
-        name = self.bridge.invoke_java(lambda ep: ep.openFile(path))
+        # Under the bubblewrap sandbox the JVM cannot see most of the filesystem; this copies the
+        # binary somewhere it can when that applies, and is a no-op otherwise.
+        usable = self.bridge.stage_path_for_jvm(path)
+        name = self.bridge.invoke_java(lambda ep: ep.openFile(usable))
         return str(name)
 
     def run_auto_analysis(self) -> dict[str, Any]:

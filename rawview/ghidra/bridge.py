@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
@@ -149,6 +150,13 @@ def _bwrap_available() -> bool:
     return shutil.which("bwrap") is not None
 
 
+# Trees the sandbox replaces with an empty tmpfs. Kept here rather than inline in the bwrap
+# argument list because :meth:`GhidraBridgeController.stage_path_for_jvm` has to know exactly
+# which paths the JVM cannot see; two copies of this list would drift and silently start
+# handing the JVM paths that are not there.
+_BWRAP_TMPFS_ROOTS = ("/home", "/root", "/media", "/mnt", "/srv", "/var", "/tmp")
+
+
 def _build_bwrap_mounts_and_rewrite(
     *,
     java_exe: Path,
@@ -188,18 +196,10 @@ def _build_bwrap_mounts_and_rewrite(
         "--ro-bind",
         "/",
         "/",
-        "--tmpfs",
-        "/home",
-        "--tmpfs",
-        "/root",
-        "--tmpfs",
-        "/media",
-        "--tmpfs",
-        "/mnt",
-        "--tmpfs",
-        "/srv",
-        "--tmpfs",
-        "/var",
+    ]
+    for hidden in _BWRAP_TMPFS_ROOTS:
+        bwrap_args += ["--tmpfs", hidden]
+    bwrap_args += [
         "--proc",
         "/proc",
         "--dev",
@@ -207,8 +207,6 @@ def _build_bwrap_mounts_and_rewrite(
         "--ro-bind",
         "/sys",
         "/sys",
-        "--tmpfs",
-        "/tmp",
     ]
 
     toolchain_roots: list[Path] = [
@@ -259,6 +257,21 @@ def _jvm_output_suggests_py4j_bind_failure(text: str) -> bool:
         or "bindexception" in t
         or "py4jnetworkexception" in t
     )
+
+
+def _prune_staged(staging: Path, *, keep_days: float = 7.0) -> None:
+    """Drop staged copies nothing has touched in a week, so the project dir is not a junk drawer."""
+    cutoff = time.time() - keep_days * 86400
+    try:
+        entries = list(staging.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
 
 
 class BridgeState(str, Enum):
@@ -335,6 +348,84 @@ class GhidraBridgeController:
         self._shutdown_unlocked()
         with self._lock:
             self._state = BridgeState.STOPPED
+
+    def _sandbox_visible_roots(self) -> list[Path]:
+        """Directories the sandboxed JVM can still read after the tmpfs mounts."""
+        roots: list[Path] = []
+        for candidate in (
+            self.ghidra_install_dir,
+            Path(self.java_executable).resolve().parent.parent
+            if Path(self.java_executable).is_file()
+            else None,
+            self.java_classes_dir or _packaged_bridge_classes_dir(),
+            self.project_dir,
+        ):
+            if candidate is None:
+                continue
+            try:
+                roots.append(Path(candidate).resolve())
+            except OSError:
+                continue
+        try:
+            roots.append(_find_py4j_jar().resolve().parent)
+        except Exception:
+            pass
+        return roots
+
+    def path_visible_to_jvm(self, path: Path) -> bool:
+        """
+        Whether the JVM can read ``path`` as it is.
+
+        Without the sandbox it reads what this process can. With it, whole trees are replaced by an
+        empty tmpfs, and only the toolchain and the project dir are bound back in.
+        """
+        if self.sandbox != "bwrap" or not _bwrap_available():
+            return True
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return False
+        hidden = any(
+            resolved == Path(root) or Path(root) in resolved.parents
+            for root in _BWRAP_TMPFS_ROOTS
+        )
+        if not hidden:
+            return True
+        return any(
+            resolved == root or root in resolved.parents for root in self._sandbox_visible_roots()
+        )
+
+    def stage_path_for_jvm(self, path: str) -> str:
+        """
+        Return a path to ``path``'s contents that the JVM can actually open.
+
+        The sandbox hides ``/home``, ``/tmp``, ``/media`` and friends, which is where binaries people
+        analyze live, so handing the JVM the path the file picker produced makes it report "Not a
+        file". Rather than binding the user's home back in, which is what the sandbox exists to
+        prevent, the file is copied into the project directory: the one tree that is already mounted
+        read-write, and where Ghidra is about to keep its own copy of the bytes anyway.
+
+        Files the JVM can already see are returned untouched, so nothing is copied on Windows, on
+        macOS, on a host without bubblewrap, or with the sandbox turned off.
+        """
+        original = Path(path)
+        if not original.is_file() or self.path_visible_to_jvm(original):
+            return path
+        staging = self.project_dir.resolve() / "staged"
+        staging.mkdir(parents=True, exist_ok=True)
+        _prune_staged(staging)
+        # Keep the name (Ghidra derives the program name from it) but key the directory on the
+        # source path, so two samples called "sample.bin" from different folders stay apart and
+        # re-opening the same file reuses its copy instead of piling up.
+        digest = hashlib.sha256(str(original.resolve()).encode("utf-8")).hexdigest()[:16]
+        target_dir = staging / digest
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / original.name
+        if not target.is_file() or target.stat().st_mtime < original.stat().st_mtime:
+            shutil.copy2(original, target)
+        os.utime(target_dir, None)
+        logger.info("Staged %s into the sandbox-visible project dir as %s", original, target)
+        return str(target)
 
     def invoke_java(self, fn: Callable[[Any], Any]) -> Any:
         """Run ``fn(entry_point)`` with exclusive access to the Py4J gateway."""
