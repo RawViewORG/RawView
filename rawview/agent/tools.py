@@ -849,8 +849,9 @@ def _build_registry(
         RegisteredTool(
             name="web_search",
             description=(
-                "Search the public web for documentation, CVEs, vendor advisories, or general facts. "
-                "Uses DuckDuckGo instant answers and related links (no API key). "
+                "Search the web for documentation, CVEs, vendor advisories, or general facts. "
+                "Goes to whichever provider is configured (WormT, Brave, SearXNG, or DuckDuckGo); "
+                "the answer names the one that served it under `source`. "
                 "Verify critical claims against primary sources."
             ),
             parameters_schema={

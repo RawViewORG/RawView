@@ -124,6 +124,45 @@ class SettingsDialog(QDialog):
         self._llm_max_tokens.setSingleStep(256)
         self._api_key = QLineEdit()
         self._api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._search_provider = QComboBox()
+        for _sid, _slabel in (
+            ("auto", "Auto (first one configured)"),
+            ("wormt", "WormT"),
+            ("brave", "Brave Search API"),
+            ("searxng", "SearXNG"),
+            ("duckduckgo", "DuckDuckGo (no key, scraped)"),
+        ):
+            self._search_provider.addItem(_slabel, _sid)
+        self._search_provider.setToolTip(
+            "Which engine the agent's web_search tool asks. Auto uses the first one that is "
+            "configured and falls back to DuckDuckGo, which needs no key but is often blocked."
+        )
+        self._wormt_url = QLineEdit()
+        self._wormt_url.setPlaceholderText("http://localhost:8080")
+        self._wormt_url.setToolTip("Base URL of a WormT instance; RawView calls its /api/search.")
+        self._wormt_key = QLineEdit()
+        self._wormt_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._wormt_key.setToolTip(
+            "A WormT API key (wormt_sk_...). Mint one in WormT under Admin -> API keys; "
+            "search requires it."
+        )
+        self._wormt_safe = QComboBox()
+        for _mid, _mlabel in (
+            ("mid", "Mid (adult domains only)"),
+            ("all", "All (domains and keywords)"),
+            ("off", "Off"),
+        ):
+            self._wormt_safe.addItem(_mlabel, _mid)
+        self._wormt_safe.setToolTip(
+            "SafeWriggle strength. Mid is the default here: it filters the unambiguous adult "
+            "domain list without keyword matching, which can flag a malware write-up."
+        )
+        self._brave_key = QLineEdit()
+        self._brave_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._brave_key.setToolTip("Brave Search API subscription token.")
+        self._searxng_url = QLineEdit()
+        self._searxng_url.setPlaceholderText("http://localhost:8888")
+        self._searxng_url.setToolTip("Base URL of a SearXNG instance with the JSON format enabled.")
         self._model = QComboBox()
         self._model.setEditable(True)
         self._model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -254,6 +293,15 @@ class SettingsDialog(QDialog):
         af.addRow("Agent history messages", self._hist)
         af.addRow("Agent effort level", self._effort_combo)
         af.addRow("Agent temperature (0-1)", self._agent_temp)
+        _search_head = QLabel("<b>Web search</b>")
+        _search_head.setTextFormat(Qt.TextFormat.RichText)
+        af.addRow(_search_head)
+        af.addRow("Search provider", self._search_provider)
+        af.addRow("WormT URL", self._wormt_url)
+        af.addRow("WormT API key", self._wormt_key)
+        af.addRow("WormT SafeWriggle", self._wormt_safe)
+        af.addRow("Brave Search API key", self._brave_key)
+        af.addRow("SearXNG URL", self._searxng_url)
         self._agent_form_block.setVisible(controller.agent_enabled)
         if not controller.agent_enabled:
             self._no_agent_note = QLabel(
@@ -398,6 +446,14 @@ class SettingsDialog(QDialog):
         self._provider.currentIndexChanged.connect(self._on_provider_changed)
         self._on_provider_changed()
         self._model.setCurrentText(s.anthropic_model)
+        _spidx = self._search_provider.findData(s.search_provider or "auto")
+        self._search_provider.setCurrentIndex(_spidx if _spidx >= 0 else 0)
+        self._wormt_url.setText(s.wormt_api_url)
+        self._wormt_key.setText(s.wormt_api_key)
+        _ssidx = self._wormt_safe.findData(s.wormt_safe_search or "mid")
+        self._wormt_safe.setCurrentIndex(_ssidx if _ssidx >= 0 else 0)
+        self._brave_key.setText(s.brave_search_api_key)
+        self._searxng_url.setText(s.searxng_url)
         self._max_turns.setValue(s.agent_max_turns)
         self._hist.setValue(s.agent_history_messages)
         self._agent_temp.setValue(float(s.agent_temperature))
@@ -652,6 +708,12 @@ class SettingsDialog(QDialog):
             data["AGENT_EXTENDED_THINKING"] = "true" if self._think.isChecked() else "false"
             data["AGENT_THINKING_BUDGET_TOKENS"] = str(self._think_budget.value())
             data["AGENT_EFFORT"] = str(self._effort_combo.currentData() or "medium")
+            data["RAWVIEW_SEARCH_PROVIDER"] = str(self._search_provider.currentData() or "auto")
+            data["WORMT_API_URL"] = self._wormt_url.text().strip()
+            data["WORMT_API_KEY"] = self._wormt_key.text().strip()
+            data["WORMT_SAFE_SEARCH"] = str(self._wormt_safe.currentData() or "mid")
+            data["BRAVE_SEARCH_API_KEY"] = self._brave_key.text().strip()
+            data["SEARXNG_URL"] = self._searxng_url.text().strip()
         save_user_settings_file(data)
         self._ctrl.reload_settings()
         self.accept()

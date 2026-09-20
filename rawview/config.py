@@ -157,9 +157,34 @@ class Settings(BaseSettings):
         validation_alias="AGENT_TEMPERATURE",
     )
 
+    # Agent web search. "auto" picks the first provider that is configured, ending at DuckDuckGo,
+    # which needs no setup. Any other value names the provider to try first.
+    search_provider: str = Field(default="auto", validation_alias="RAWVIEW_SEARCH_PROVIDER")
+    wormt_api_url: str = Field(default="", validation_alias="WORMT_API_URL")
+    wormt_api_key: str = Field(default="", validation_alias="WORMT_API_KEY")
+    # SafeWriggle filters adult content only. "mid" filters the unambiguous domain list and leaves
+    # keyword-only matches alone, so a malware or exploit write-up is not dropped as a false positive.
+    wormt_safe_search: str = Field(default="mid", validation_alias="WORMT_SAFE_SEARCH")
+    brave_search_api_key: str = Field(default="", validation_alias="BRAVE_SEARCH_API_KEY")
+    searxng_url: str = Field(default="", validation_alias="SEARXNG_URL")
+
     rawview_theme: str = Field(default="tokyo_night", validation_alias="RAWVIEW_THEME")
 
     discord_client_id: str = Field(default="1519331610510622893", validation_alias="DISCORD_CLIENT_ID")
+
+    @field_validator("search_provider", mode="before")
+    @classmethod
+    def _normalize_search_provider(cls, v: object) -> object:
+        from rawview.agent.web_search import PROVIDERS
+
+        t = str(v or "auto").strip().lower()
+        return t if t in PROVIDERS or t == "auto" else "auto"
+
+    @field_validator("wormt_safe_search", mode="before")
+    @classmethod
+    def _normalize_safe_search(cls, v: object) -> object:
+        t = str(v or "mid").strip().lower()
+        return t if t in ("off", "mid", "all") else "mid"
 
     @field_validator("rawview_theme", mode="before")
     @classmethod
