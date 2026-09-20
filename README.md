@@ -36,6 +36,7 @@ AI-assisted reverse engineering for **Ghidra**: a **Qt (PySide6)** desktop app t
 
 - Open binaries and run analysis through Ghidra without using the Ghidra Swing UI for day-to-day navigation.
 - Docked panes, themes, shortcuts, work notes, and optional RE session archives (`.rvre.zip` style workflow).
+- **Call graph**, **patching** (byte edits, an assembler, and export of the patched binary), **search everywhere** across functions/symbols/strings/imports/exports/data, and a **function-level diff** against a second binary.
 - Packaged for all three desktops: **PyInstaller** onedir plus a per-user **WiX MSI** (Windows), `.deb`/`.rpm`/`.AppImage` (Linux), and a signed-ad-hoc `.app` inside a `.dmg` (macOS, Apple Silicon and Intel). Prebuilt installers are on the **Releases** tab.
 
 ## Requirements

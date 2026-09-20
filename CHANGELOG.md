@@ -1,5 +1,106 @@
 # Changelog
 
+## Unreleased
+
+### Linux: the sandbox made the app unusable, twice
+
+1.3.6 shipped a bubblewrap sandbox around the Ghidra JVM. On any Linux host with
+`bwrap` installed, which is the default configuration, it broke two things outright.
+
+**Binaries could not be opened at all.** The sandbox mounts an empty tmpfs over `/home`,
+`/tmp`, `/media`, `/mnt`, `/srv` and `/var`, then binds back only the Ghidra install, the
+JDK, the bridge classes and the project directory. Every directory a sample is actually
+opened from was therefore invisible, and opening one failed with `Not a file: <path>`.
+Binding `$HOME` back in would undo the point of the sandbox, so the chosen file is now
+staged into the project directory - already mounted read-write, and where Ghidra keeps
+its own copy of the bytes anyway. Copies are keyed by source path, so two samples with
+the same name stay apart, and anything untouched for a week is pruned. Paths the JVM can
+already reach are used as they are, so nothing is copied on Windows, on macOS, or with
+the sandbox off.
+
+**The JVM died a second after it booted.** `--die-with-parent` is `PR_SET_PDEATHSIG`,
+which Linux delivers when the parent *thread* exits, not the parent process. RawView
+starts the bridge from short-lived workers - the boot prewarm, opening a binary, an agent
+tool - so the JVM was killed the moment the worker that spawned it returned. The JVM now
+spawns from a thread that parks until shutdown, so its pdeathsig parent outlives every
+worker while still dying with the process.
+
+A third symptom of the same blind spot: JVM-side writes to a path the user chose landed
+in the sandbox's ephemeral tmpfs, so exporting a file reported success and left nothing
+behind. Those writes now go through the project directory and are moved into place by
+RawView itself.
+
+### Call graph
+
+A new tab showing callers and callees of the current function as two trees, expanded one
+branch at a time. A call graph is not a CFG: `free` in `/bin/ls` reaches 149 functions two
+levels out, so each expansion asks the bridge for a single level rather than drawing a
+graph nobody can read. Cycles are marked and stop there, external functions are listed but
+not expandable, and double-clicking navigates.
+
+### Patching
+
+Write bytes or assemble an instruction at an address, see everything that differs from the
+file on disk, revert any of it, and export the binary with the patches applied.
+
+Assembling has a dry run that reports the encoding, its length, the length of the
+instruction it replaces, and whether the new one is longer and would overwrite the next.
+The first test written for this feature assembled cleanly and produced a binary that
+crashed, which is why that warning exists and why Apply stays disabled until the input
+assembles.
+
+The patch list is read back out of the program rather than being a log of what RawView
+did, so it survives reopening and shows edits made anywhere. Relocations are excluded:
+Ghidra applies them at import, so they appear in the modified bytes exactly like a user
+edit, and writing them into an exported file would hand the loader bytes that have already
+been relocated once. Export writes the original file image with the patches overlaid, so
+headers, padding and unmapped regions survive byte for byte and the result still runs.
+
+The hex pane stays read-only. Editing a rendered dump in place means mapping keystrokes
+back through the address, hex and ascii columns, and getting that wrong writes the wrong
+byte to the wrong address with nothing on screen to show for it.
+
+### Search everywhere
+
+One box (Ctrl+Shift+F) over functions, symbols, strings, imports, exports and data labels,
+with per-kind filters. The query runs in the JVM in a single pass instead of pulling six
+listings over the bridge, each kind is capped independently and says when it capped, and a
+query that parses as an address yields an address hit so pasting one navigates.
+
+### Diff two binaries
+
+Import a second binary beside the loaded one and report which functions are identical,
+changed, only here or only there, with instruction-count deltas.
+
+Functions match by name, and by code when the name is one Ghidra invented, so stripped
+binaries match on substance rather than on `FUN_00401000` lining up with an unrelated
+`FUN_00401000`. The fingerprint keeps registers and constants and replaces absolute
+addresses with a placeholder: keeping constants is what catches a changed key, port or
+magic value between two malware builds, and normalising addresses is what stops a rebased
+binary from reporting every function as changed.
+
+### Agent
+
+31 tools to 48. The panes above are all reachable from the agent, along with the listing
+and edit gaps against comparable Ghidra tooling: resolving an address to its function,
+the call graph, one-shot cross-program search, the memory map, namespaces, data items,
+renaming a data label, and retyping a local.
+
+`get_current_address` and `get_current_function` answer "this function" from the UI's real
+selection - RawView's agent runs inside the window, so unlike a detached MCP server it can
+answer that honestly. `compare_binary` imports, analyzes and diffs in one call. Patching
+tools dry-run by default, and the system prompt now says to explain a patch before making
+one and to close a comparison when finished.
+
+### Web search actually searches
+
+`web_search` called DuckDuckGo's instant-answer API, which is not a search engine: it
+answers with an encyclopedia abstract and disambiguation links, and returned nothing for
+the queries this tool exists to serve. It now goes to a WormT instance, the Brave Search
+API, a SearXNG instance, or DuckDuckGo's result page as the keyless fallback, picking the
+first one configured and naming the provider that answered. All four are configurable
+under File -> Settings.
+
 ## 1.3.6
 
 ### macOS: the disk images actually work now
