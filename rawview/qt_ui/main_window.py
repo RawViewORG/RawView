@@ -63,6 +63,7 @@ import qtawesome as qta
 
 from rawview.config import user_data_dir
 from rawview.qt_ui.cfg_panel import CfgPanel
+from rawview.qt_ui.agent_activity import AgentActivityBar
 from rawview.qt_ui.callgraph_panel import CallGraphPanel
 from rawview.qt_ui.patches_panel import PatchesPanel
 from rawview.qt_ui.search_panel import SearchPanel
@@ -283,11 +284,37 @@ class MainWindow(QMainWindow):
         if active:
             self._btn_send_stop.setIcon(qta.icon("fa6s.stop", color="#f7768e"))
             self._btn_send_stop.setText("Stop")
+            self._activity_bar.start("Thinking")
         else:
             self._btn_send_stop.setIcon(qta.icon("fa6s.paper-plane", color="#7aa2f7"))
             self._btn_send_stop.setText("Send")
             self._thinking_indicator.clear()
             self._thinking_indicator.setVisible(False)
+            self._activity_bar.stop()
+
+    def _agent_accent_color(self) -> str:
+        """Theme accent for the activity bar and chip, taken from the pseudocode keyword color."""
+        try:
+            return pseudocode_palette(self._ctrl.settings.rawview_theme).get("keyword", "#7aa2f7")
+        except Exception:  # noqa: BLE001 - a bad theme id must not break the dock chrome
+            return "#7aa2f7"
+
+    def _refresh_provider_chip(self) -> None:
+        """Show which backend the Agent dock is talking to, e.g. 'Claude Code · opus'."""
+        if self._no_agent or not hasattr(self, "_agent_provider_chip"):
+            return
+        from rawview.agent.providers import preset_by_id
+
+        s = self._ctrl.settings
+        preset = preset_by_id(s.llm_provider)
+        if preset.kind == "claude_code":
+            model = (s.claude_code_model or "").strip()
+            label = "Claude Code" + (f" · {model}" if model else "")
+        elif preset.kind == "anthropic":
+            label = (s.anthropic_model or "claude").strip()
+        else:
+            label = (s.llm_model or preset.label).strip()
+        self._agent_provider_chip.setText(label)
 
     def _show_user_tip(self, message: str) -> None:
         self._tip_label.setText(message[:400])
@@ -595,6 +622,10 @@ class MainWindow(QMainWindow):
         head_lbl = QLabel("Agent")
         head_lbl.setObjectName("agent_head_label")
         row_head.addWidget(head_lbl)
+        self._agent_provider_chip = QLabel("")
+        self._agent_provider_chip.setObjectName("agent_provider_chip")
+        self._agent_provider_chip.setToolTip("Active agent backend. Change it in File -> Settings.")
+        row_head.addWidget(self._agent_provider_chip)
         self._chat_title_label = QLabel("")
         self._chat_title_label.setObjectName("agent_chat_title")
         self._chat_title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -623,13 +654,16 @@ class MainWindow(QMainWindow):
         self._agent_feed.setPlaceholderText("Agent activity (tools, results) streams here when enabled.")
         al.addWidget(self._agent_feed, stretch=1)
 
-        # ── Thinking indicator (shown while model reasons) ─────────────────────
+        # ── Animated activity bar (spinner + live status while the agent works) ─
+        self._activity_bar = AgentActivityBar(accent="#7aa2f7")
+        al.addWidget(self._activity_bar)
+        # Kept for the long "live thinking" preview text; folded under the activity bar.
         self._thinking_indicator = QLabel("")
         self._thinking_indicator.setObjectName("agent_thinking_indicator")
         self._thinking_indicator.setVisible(False)
         self._thinking_indicator.setWordWrap(True)
         self._thinking_indicator.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        self._thinking_indicator.setMaximumHeight(52)
+        self._thinking_indicator.setMaximumHeight(48)
         al.addWidget(self._thinking_indicator)
 
         # ── Attachment preview ──────────────────────────────────────────────────
@@ -645,6 +679,7 @@ class MainWindow(QMainWindow):
         # Unified input box: the circle-plus lives INSIDE the styled frame
         input_frame = QFrame()
         input_frame.setObjectName("agent_input_frame")
+        self._agent_input_frame = input_frame
         input_frame.setFrameShape(QFrame.Shape.StyledPanel)
         input_frame_layout = QHBoxLayout(input_frame)
         input_frame_layout.setContentsMargins(6, 4, 6, 4)
@@ -668,6 +703,7 @@ class MainWindow(QMainWindow):
         self._agent_prompt.setFixedHeight(34)
         self._agent_prompt.setFrameShape(QFrame.Shape.NoFrame)
         self._agent_prompt.document().contentsChanged.connect(self._adjust_prompt_height)
+        self._agent_prompt.installEventFilter(self)
         input_frame_layout.addWidget(self._agent_prompt, stretch=1)
 
         input_row.addWidget(input_frame, stretch=1)
@@ -704,7 +740,21 @@ class MainWindow(QMainWindow):
             QEvent.Type.Move,
         ):
             self._save_ui_timer.start()
+        if watched is getattr(self, "_agent_prompt", None) and event.type() in (
+            QEvent.Type.FocusIn,
+            QEvent.Type.FocusOut,
+        ):
+            self._set_input_focus_glow(event.type() == QEvent.Type.FocusIn)
         return super().eventFilter(watched, event)
+
+    def _set_input_focus_glow(self, on: bool) -> None:
+        """Brighten the prompt frame's border while it holds focus."""
+        frame = getattr(self, "_agent_input_frame", None)
+        if frame is None:
+            return
+        accent = self._agent_accent_color()
+        border = accent if on else "palette(mid)"
+        frame.setStyleSheet(f"QFrame#agent_input_frame {{ border: 1px solid {border}; border-radius: 6px; }}")
 
     def _wire_layout_autosave(self) -> None:
         for dock in self._main_docks():
@@ -881,6 +931,9 @@ class MainWindow(QMainWindow):
         self._cfg.set_theme(self._ctrl.settings.rawview_theme)
         self._hex_panel.apply_theme(self._ctrl.settings.rawview_theme)
         self._setup_agent_feed_html()
+        if not self._no_agent:
+            self._refresh_provider_chip()
+            self._activity_bar.set_accent(self._agent_accent_color())
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -904,18 +957,19 @@ class MainWindow(QMainWindow):
     def _apply_agent_availability(self) -> None:
         if self._no_agent or self._dock_agent is None:
             return
-        has = self._ctrl.has_anthropic_key()
+        self._refresh_provider_chip()
+        cred_err = self._ctrl.agent_credentials_error()
+        ready = not cred_err
         self._dock_agent.setEnabled(True)
-        self._agent_prompt.setEnabled(has)
-        self._btn_send_stop.setEnabled(has)
-        self._btn_attach.setEnabled(has)
-        if not has:
+        self._agent_prompt.setEnabled(ready)
+        self._btn_send_stop.setEnabled(ready)
+        self._btn_attach.setEnabled(ready)
+        if not ready:
             self._agent_feed.setPlaceholderText(
-                "Agent disabled: set ANTHROPIC_API_KEY in File > Settings. "
-                "All other panels work without AI."
+                f"Agent not ready: {cred_err} All other panels work without it."
             )
         else:
-            self._agent_feed.setPlaceholderText("Agent activity (tools, results) streams here.")
+            self._agent_feed.setPlaceholderText("Ask the agent about the binary you have open.")
 
     def _build_menu(self) -> None:
         m_file = self.menuBar().addMenu("&File")
@@ -1770,6 +1824,7 @@ class MainWindow(QMainWindow):
             chunk = str(data.get("text", ""))
             if not chunk:
                 return
+            self._activity_bar.set_status("Writing")
             if self._stream_start_pos < 0:
                 # Insert the assistant bubble header on first delta
                 cursor = self._agent_feed.textCursor()
@@ -1791,7 +1846,8 @@ class MainWindow(QMainWindow):
             raw = str(data.get("text", ""))
             if not raw.strip():
                 return
-            display = raw[-300:] if len(raw) > 300 else raw
+            display = raw[-240:] if len(raw) > 240 else raw
+            self._activity_bar.set_status("Thinking")
             self._thinking_indicator.setText(f"💭 {display}")
             self._thinking_indicator.setVisible(True)
             return
@@ -1870,6 +1926,7 @@ class MainWindow(QMainWindow):
             return
         if kind == "tool_call":
             name = esc(str(data.get("name", "")))
+            self._activity_bar.set_status(f"Running {data.get('name', 'tool')!s}")
             tid = esc(str(data.get("id", "")))
             inp = data.get("input", {})
             try:
@@ -1956,6 +2013,7 @@ class MainWindow(QMainWindow):
             )
             self._agent_tool_expand_html[uid] = expanded
             self._append_feed_html(collapsed)
+            self._activity_bar.set_status("Thinking")
             return
         if kind in ("agent_done", "agent_stopped", "agent_error"):
             # Clean up any pending stream bubble that didn't get a commit (e.g. interrupted)

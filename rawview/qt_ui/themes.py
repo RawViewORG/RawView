@@ -830,6 +830,18 @@ def agent_dock_stylesheet(theme_id: str) -> str:
         QTextEdit#agent_prompt {{
             background-color: transparent; color: {c.prompt_fg}; border: none; padding: 2px;
         }}
+        QLabel#agent_head_label {{ color: {c.root_fg}; font-weight: bold; font-size: 11pt; }}
+        QLabel#agent_provider_chip {{
+            color: {c.html_link}; background: {c.html_tool_bg}; border: 1px solid {c.activity_border};
+            border-radius: 9px; padding: 1px 9px; font-size: 8.5pt; font-weight: bold;
+        }}
+        QLabel#agent_chat_title {{ color: {c.muted}; font-style: italic; }}
+        QPushButton#btn_send_stop {{
+            background: {c.html_tool_bg}; color: {c.root_fg}; border: 1px solid {c.activity_border};
+            border-radius: 6px; padding: 4px 14px; font-weight: bold;
+        }}
+        QPushButton#btn_send_stop:hover {{ border: 1px solid {c.html_link}; }}
+        QPushButton#btn_send_stop:disabled {{ color: {c.html_meta}; }}
     """
 
 
@@ -846,26 +858,36 @@ def agent_feed_document_default_stylesheet(theme_id: str) -> str:
             "a.rvlink:hover{text-decoration:underline;}"
         )
     c = _AGENT_DOCK_CHROME.get(tid) or _AGENT_DOCK_CHROME["tokyo_night"]
+    # Qt's rich-text engine honours background/border/padding/margin but ignores border-radius, so
+    # the message "cards" are flat fills with an accent left edge rather than rounded bubbles - the
+    # rounding lives on the widget frame. The point is clear role separation and breathing room.
     return (
         f"body{{font-family:'Segoe UI',Consolas,sans-serif;font-size:10pt;color:{c.html_body_fg};"
         f"background:{c.html_body_bg};}}"
-        f".rvt{{color:{c.html_rvt};font-style:italic;}}"
-        f".rva{{color:{c.html_rva};line-height:1.45;}}"
-        f".rvu{{color:{c.html_meta};line-height:1.45;border-left:2px solid {c.html_meta};"
-        f"padding-left:6px;margin:4px 0;}}"
-        ".rvavatar{font-size:10pt;margin-right:4px;}"
+        # assistant: soft card, accent left edge
+        f".rva{{color:{c.html_rva};line-height:1.5;background:{c.html_tool_bg};"
+        f"border-left:3px solid {c.html_tool_border};padding:8px 12px;margin:8px 0;}}"
+        # user: distinct tint, quieter left edge
+        f".rvu{{color:{c.html_rva};line-height:1.5;background:{c.html_body_bg};"
+        f"border-left:3px solid {c.html_link};padding:8px 12px;margin:8px 0;}}"
+        # thinking: muted, dashed edge, sits back
+        f".rvt{{color:{c.html_rvt};font-style:italic;background:{c.thinking_bg};"
+        f"border-left:2px dashed {c.html_meta};padding:6px 12px;margin:6px 0;line-height:1.45;}}"
+        f".rvavatar{{font-size:10pt;margin-right:6px;font-weight:bold;}}"
         f".rvtool{{background:{c.html_tool_bg};border-left:3px solid {c.html_tool_border};"
-        f"border-radius:4px;padding:8px 10px;margin:8px 0;}}"
+        f"padding:8px 12px;margin:8px 0;}}"
         f".rvtool-fold{{border-left-color:{c.html_meta};}}"
         ".rvweb .rvweb-primary{margin-top:6px;word-break:break-all;}"
-        f".rvpre{{white-space:pre-wrap;font-family:Consolas,monospace;font-size:9.5pt;color:{c.html_pre_fg};}}"
-        f".rvmeta{{color:{c.html_meta};font-size:9pt;}}"
+        f".rvpre{{white-space:pre-wrap;font-family:Consolas,monospace;font-size:9.5pt;color:{c.html_pre_fg};"
+        f"background:{c.html_code_bg};padding:8px;margin-top:6px;}}"
+        f".rvmeta{{color:{c.html_meta};font-size:8.5pt;letter-spacing:0.3px;}}"
         f".rvlink{{color:{c.html_link};text-decoration:none;}}"
-        f".rvnotice{{color:{c.html_notice};font-size:9.5pt;padding:4px 0;}}"
+        f".rvnotice{{color:{c.html_notice};font-size:9.5pt;background:{c.thinking_bg};"
+        f"border-left:3px solid {c.html_notice};padding:6px 12px;margin:6px 0;}}"
         "a.rvlink:hover{text-decoration:underline;}"
         f"code{{font-family:Consolas,monospace;background:{c.html_code_bg};padding:1px 4px;"
-        f"border-radius:3px;font-size:9.5pt;}}"
-        f"pre{{background:{c.html_code_bg};border-radius:4px;padding:6px;}}"
+        f"font-size:9.5pt;}}"
+        f"pre{{background:{c.html_code_bg};padding:8px;}}"
     )
 
 
