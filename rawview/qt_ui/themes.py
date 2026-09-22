@@ -842,6 +842,21 @@ def agent_dock_stylesheet(theme_id: str) -> str:
         }}
         QPushButton#btn_send_stop:hover {{ border: 1px solid {c.html_link}; }}
         QPushButton#btn_send_stop:disabled {{ color: {c.html_meta}; }}
+        QStackedWidget {{ background: {c.feed_bg}; }}
+        QLabel#agent_welcome_title {{ color: {c.root_fg}; font-size: 15pt; font-weight: bold; }}
+        QLabel#agent_welcome_sub {{ color: {c.muted}; font-size: 10pt; }}
+        QPushButton#agent_welcome_pill {{
+            color: {c.html_link}; background: {c.html_tool_bg}; border: 1px solid {c.activity_border};
+            border-radius: 14px; padding: 7px 16px; font-size: 10pt;
+        }}
+        QPushButton#agent_welcome_pill:hover {{
+            border: 1px solid {c.html_link}; background: {c.prompt_bg};
+        }}
+        QPushButton#agent_quick_pill {{
+            color: {c.muted}; background: {c.html_tool_bg}; border: 1px solid {c.activity_border};
+            border-radius: 11px; padding: 3px 11px; font-size: 8.5pt;
+        }}
+        QPushButton#agent_quick_pill:hover {{ color: {c.root_fg}; border: 1px solid {c.html_link}; }}
     """
 
 

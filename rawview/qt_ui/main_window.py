@@ -28,6 +28,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence, QShortcut, QTextCursor, QTextDocumentFragment
 from PySide6.QtWidgets import (
+    QStackedWidget,
     QAbstractItemView,
     QApplication,
     QComboBox,
@@ -64,6 +65,7 @@ import qtawesome as qta
 from rawview.config import user_data_dir
 from rawview.qt_ui.cfg_panel import CfgPanel
 from rawview.qt_ui.agent_activity import AgentActivityBar
+from rawview.qt_ui.agent_chips import AgentQuickActions, AgentWelcome
 from rawview.qt_ui.callgraph_panel import CallGraphPanel
 from rawview.qt_ui.patches_panel import PatchesPanel
 from rawview.qt_ui.search_panel import SearchPanel
@@ -199,6 +201,7 @@ class MainWindow(QMainWindow):
         self._agent_feed_html_chunks.clear()
         self._agent_tool_expand_html.clear()
         self._setup_agent_feed_html()
+        self._show_feed_stack(welcome=True)
 
     def _append_agent_html(self, fragment: str) -> None:
         if self._no_agent:
@@ -221,6 +224,8 @@ class MainWindow(QMainWindow):
         self._agent_feed.clear()
         self._setup_agent_feed_html()
         self._agent_feed_html_chunks = list(chunks)
+        if chunks:
+            self._show_feed_stack(welcome=False)
         for fragment in chunks:
             self._append_agent_html(fragment)
         if preserve_scroll and prev is not None:
@@ -652,7 +657,12 @@ class MainWindow(QMainWindow):
         self._agent_feed.setOpenExternalLinks(False)
         self._agent_feed.anchorClicked.connect(self._on_agent_feed_anchor)
         self._agent_feed.setPlaceholderText("Agent activity (tools, results) streams here when enabled.")
-        al.addWidget(self._agent_feed, stretch=1)
+        # A welcome card sits in front of the empty feed and steps aside on the first message.
+        self._agent_welcome = AgentWelcome(self._run_prompt_from_chip)
+        self._agent_feed_stack = QStackedWidget()
+        self._agent_feed_stack.addWidget(self._agent_welcome)
+        self._agent_feed_stack.addWidget(self._agent_feed)
+        al.addWidget(self._agent_feed_stack, stretch=1)
 
         # ── Animated activity bar (spinner + live status while the agent works) ─
         self._activity_bar = AgentActivityBar(accent="#7aa2f7")
@@ -671,6 +681,10 @@ class MainWindow(QMainWindow):
         self._attach_preview.setObjectName("agent_attach_preview")
         self._attach_preview.setVisible(False)
         al.addWidget(self._attach_preview)
+
+        # ── Quick actions: one-tap starters that fill the prompt ───────────────
+        self._agent_quick_actions = AgentQuickActions(self._fill_prompt_from_chip)
+        al.addWidget(self._agent_quick_actions)
 
         # ── Input bar: [ [⊕  prompt text area  ] ] [Send/Stop] ────────────────
         input_row = QHBoxLayout()
@@ -1727,9 +1741,34 @@ class MainWindow(QMainWindow):
             self._attach_preview.setText(f"📎 {', '.join(parts)} attached - will send with next message")
             self._attach_preview.setVisible(True)
 
+    def _fill_prompt_from_chip(self, text: str) -> None:
+        """Quick-action pill: drop a starter into the prompt and focus it (does not send)."""
+        if self._no_agent:
+            return
+        self._agent_prompt.setPlainText(text)
+        self._agent_prompt.setFocus()
+        cursor = self._agent_prompt.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self._agent_prompt.setTextCursor(cursor)
+
+    def _run_prompt_from_chip(self, text: str) -> None:
+        """Welcome-card pill: send the prompt straight away."""
+        if self._no_agent or not self._agent_prompt.isEnabled():
+            return
+        self._agent_prompt.setPlainText(text)
+        self._send_agent()
+
+    def _show_feed_stack(self, *, welcome: bool) -> None:
+        """Flip between the welcome card and the live feed."""
+        stack = getattr(self, "_agent_feed_stack", None)
+        if stack is None:
+            return
+        stack.setCurrentWidget(self._agent_welcome if welcome else self._agent_feed)
+
     def _send_agent(self) -> None:
         if self._no_agent:
             return
+        self._show_feed_stack(welcome=False)
         raw = self._agent_prompt.toPlainText()
         if not raw.strip() and not self._pending_images:
             return
