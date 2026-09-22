@@ -102,6 +102,7 @@ class RawViewQtController(QObject):
         self.agent_memory = ConversationMemory(max_messages=self.settings.agent_history_messages)
         self._brain: AgentBrain | None = None
         self._mcp_endpoint: Any = None
+        self._claude_session: Any = None
         self._agent_thread: threading.Thread | None = None
         self._agent_start_lock = threading.Lock()
         self._agent_stop_event = threading.Event()
@@ -168,6 +169,20 @@ class RawViewQtController(QObject):
         Anthropic key is required.
         """
         preset = preset_by_id(self.settings.llm_provider)
+        if preset.kind == "claude_code":
+            from rawview.agent.claude_code import claude_code_available
+
+            if not claude_code_available(self.settings.claude_code_path):
+                return (
+                    "The claude CLI was not found. Install Claude Code, or set its path in "
+                    "File -> Settings."
+                )
+            if not self.settings.rawview_mcp_enabled:
+                return (
+                    "Claude Code needs RawView's tools: turn on 'Allow MCP clients' in "
+                    "File -> Settings."
+                )
+            return ""
         if preset.kind == "anthropic":
             if not self.settings.anthropic_api_key.strip():
                 return "Set ANTHROPIC_API_KEY in File → Settings."
@@ -543,6 +558,8 @@ class RawViewQtController(QObject):
         self._agent_stop_event.set()
         if self._brain is not None:
             self._brain.interrupt()
+        if self._claude_session is not None:
+            self._claude_session.interrupt()
 
     def schedule_ghidra_shell_refresh(self, program_name: str | None) -> None:
         """Refresh function list, tables, and listing/decompiler after agent tools change the program."""
@@ -592,6 +609,16 @@ class RawViewQtController(QObject):
         cred_err = self.agent_credentials_error()
         if cred_err:
             self.agent_event.emit("agent_error", {"message": cred_err})
+            return
+
+        # Claude Code runs its own loop over the MCP tools; it does not use the brain or provider.
+        if self.uses_claude_code():
+            if images:
+                self.agent_event.emit(
+                    "agent_notice",
+                    {"message": "Claude Code sessions are text-only here; the attachment was ignored."},
+                )
+            self._run_claude_code_turn(text)
             return
 
         is_new_chat = not self.agent_memory.is_nonempty()
@@ -745,6 +772,65 @@ class RawViewQtController(QObject):
 
     def clear_agent_memory(self) -> None:
         self.agent_memory.clear()
+        if self._claude_session is not None:
+            self._claude_session.reset()
+
+    def uses_claude_code(self) -> bool:
+        """True when the Agent dock is backed by the Claude Code CLI rather than the brain."""
+        return preset_by_id(self.settings.llm_provider).kind == "claude_code"
+
+    def _run_claude_code_turn(self, text: str) -> None:
+        """Drive one Agent-dock turn through the Claude Code CLI instead of the brain."""
+        from rawview.agent.claude_code import (
+            ClaudeCodeSession,
+            ClaudeCodeUnavailable,
+            find_claude_cli,
+        )
+        from rawview.mcp import rawview_mcp_command
+
+        def emit(kind: str, data: dict[str, Any]) -> None:
+            self.agent_event.emit(kind, data)
+
+        with self._agent_start_lock:
+            t = self._agent_thread
+            if t is not None and t.is_alive():
+                emit("agent_error", {"message": "The agent is still running. Press Stop first."})
+                return
+            # The rawview MCP server the CLI will spawn connects back to this window, so the
+            # endpoint has to be up before the turn starts.
+            if self._mcp_endpoint is None or not self._mcp_endpoint.running:
+                self.start_mcp_endpoint()
+            if self._mcp_endpoint is None or not self._mcp_endpoint.running:
+                emit("agent_error", {"message": "Could not start RawView's MCP endpoint for Claude Code."})
+                return
+            claude_path = find_claude_cli(self.settings.claude_code_path)
+            if not claude_path:
+                emit("agent_error", {"message": "The claude CLI was not found. Set its path in Settings."})
+                return
+            if self._claude_session is None:
+                self._claude_session = ClaudeCodeSession(
+                    claude_path=claude_path,
+                    model=self.settings.claude_code_model,
+                    mcp_command=rawview_mcp_command(),
+                )
+            session = self._claude_session
+
+            def run() -> None:
+                emit("agent_generating", {"active": True})
+                try:
+                    session.run_turn(text, emit=emit)
+                    emit("agent_done", {})
+                except ClaudeCodeUnavailable as e:
+                    emit("agent_error", {"message": str(e)})
+                except Exception as e:
+                    logger.exception("claude code turn")
+                    emit("agent_error", {"message": str(e), "trace": traceback.format_exc()})
+                finally:
+                    self._agent_stop_event.clear()
+                    emit("agent_generating", {"active": False})
+
+            self._agent_thread = threading.Thread(target=run, name="rawview-claude-code", daemon=True)
+            self._agent_thread.start()
 
     def save_agent_chat_archive(
         self,

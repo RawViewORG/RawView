@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
-import sys
 import threading
 from pathlib import Path
 
@@ -104,6 +102,15 @@ class SettingsDialog(QDialog):
         self._provider.setToolTip("Which backend the agent talks to.")
         self._provider_hint = QLabel("")
         self._provider_hint.setWordWrap(True)
+        self._cc_path = QLineEdit()
+        self._cc_path.setPlaceholderText("auto-detected (leave blank), or /path/to/claude")
+        self._cc_path.setToolTip("Path to the claude CLI. Blank lets RawView find it on PATH.")
+        self._cc_model = QLineEdit()
+        self._cc_model.setPlaceholderText("default (blank), or an alias like opus / sonnet")
+        self._cc_model.setToolTip("Model for Claude Code to use; blank uses its own default.")
+        self._cc_status = QLabel("")
+        self._cc_status.setWordWrap(True)
+        self._cc_status.setTextFormat(Qt.TextFormat.RichText)
         self._llm_base_url = QLineEdit()
         self._llm_base_url.setPlaceholderText("http://localhost:11434/v1")
         self._llm_key = QLineEdit()
@@ -291,6 +298,9 @@ class SettingsDialog(QDialog):
         af.setHorizontalSpacing(14)
         af.addRow("Provider", self._provider)
         af.addRow("", self._provider_hint)
+        af.addRow("claude CLI path", self._cc_path)
+        af.addRow("Claude Code model", self._cc_model)
+        af.addRow("", self._cc_status)
         af.addRow("Anthropic API key", self._api_key)
         af.addRow("Anthropic model", self._model)
         af.addRow("Endpoint base URL", self._llm_base_url)
@@ -445,6 +455,24 @@ class SettingsDialog(QDialog):
         save_shortcut_map(self._ui_state, out)
         return True
 
+    def _refresh_cc_status(self) -> None:
+        """Report whether the claude CLI is found and MCP is on, so setup problems are visible."""
+        from rawview.agent.claude_code import find_claude_cli
+
+        found = find_claude_cli(self._cc_path.text())
+        cli = (
+            f'<span style="color:#9ece6a">found: {found}</span>'
+            if found
+            else '<span style="color:#f7768e">claude CLI not found - install Claude Code or set the path</span>'
+        )
+        mcp_on = self._mcp_enabled.isChecked()
+        mcp = (
+            '<span style="color:#9ece6a">MCP clients allowed</span>'
+            if mcp_on
+            else '<span style="color:#e0af68">turn on "Allow MCP clients" below - Claude Code needs it</span>'
+        )
+        self._cc_status.setText(f"CLI: {cli}<br>Tools: {mcp}")
+
     def _refresh_mcp_hint(self) -> None:
         """Show the exact command to register this with Claude Code, or why it is not available."""
         if not self._mcp_enabled.isChecked():
@@ -483,6 +511,9 @@ class SettingsDialog(QDialog):
         self._provider.currentIndexChanged.connect(self._on_provider_changed)
         self._on_provider_changed()
         self._model.setCurrentText(s.anthropic_model)
+        self._cc_path.setText(s.claude_code_path)
+        self._cc_model.setText(s.claude_code_model)
+        self._cc_path.textChanged.connect(lambda _t: self._refresh_cc_status())
         _spidx = self._search_provider.findData(s.search_provider or "auto")
         self._search_provider.setCurrentIndex(_spidx if _spidx >= 0 else 0)
         self._wormt_url.setText(s.wormt_api_url)
@@ -494,6 +525,7 @@ class SettingsDialog(QDialog):
         self._mcp_enabled.setChecked(bool(s.rawview_mcp_enabled))
         self._mcp_port.setValue(int(s.rawview_mcp_port))
         self._mcp_enabled.toggled.connect(self._refresh_mcp_hint)
+        self._mcp_enabled.toggled.connect(lambda _c: self._refresh_cc_status())
         self._refresh_mcp_hint()
         self._max_turns.setValue(s.agent_max_turns)
         self._hist.setValue(s.agent_history_messages)
@@ -513,9 +545,19 @@ class SettingsDialog(QDialog):
     def _on_provider_changed(self, *_: object) -> None:
         """Show only the fields the selected backend actually uses."""
         preset = preset_by_id(str(self._provider.currentData() or "anthropic"))
+        is_cc = preset.kind == "claude_code"
         is_anthropic = preset.kind == "anthropic"
+        is_openai = not is_anthropic and not is_cc
         self._api_key.setVisible(is_anthropic)
         self._model.setVisible(is_anthropic)
+        for w in (self._cc_path, self._cc_model, self._cc_status):
+            w.setVisible(is_cc)
+        if is_cc:
+            # Claude Code cannot reach RawView's tools without the MCP endpoint, so default it on
+            # the moment this backend is chosen; the user can still untick it and see the warning.
+            if not self._mcp_enabled.isChecked():
+                self._mcp_enabled.setChecked(True)
+            self._refresh_cc_status()
         for w in (
             self._llm_base_url,
             self._llm_key,
@@ -524,7 +566,7 @@ class SettingsDialog(QDialog):
             self._llm_tools,
             self._llm_max_tokens,
         ):
-            w.setVisible(not is_anthropic)
+            w.setVisible(is_openai)
         # Anthropic thinking/effort controls are meaningless on other backends.
         self._think.setEnabled(is_anthropic)
         self._effort_combo.setEnabled(is_anthropic)
@@ -547,6 +589,8 @@ class SettingsDialog(QDialog):
             for w in (
                 self._api_key,
                 self._model,
+                self._cc_path,
+                self._cc_model,
                 self._llm_base_url,
                 self._llm_key,
                 self._llm_tools,
@@ -743,6 +787,8 @@ class SettingsDialog(QDialog):
             data["LLM_SUPPORTS_TOOLS"] = "true" if self._llm_tools.isChecked() else "false"
             data["ANTHROPIC_API_KEY"] = self._api_key.text().strip()
             data["ANTHROPIC_MODEL"] = self._model.currentText().strip() or "claude-opus-5"
+            data["CLAUDE_CODE_PATH"] = self._cc_path.text().strip()
+            data["CLAUDE_CODE_MODEL"] = self._cc_model.text().strip()
             data["AGENT_MAX_TURNS"] = str(self._max_turns.value())
             data["AGENT_HISTORY_MESSAGES"] = str(self._hist.value())
             data["AGENT_TEMPERATURE"] = str(round(float(self._agent_temp.value()), 4))
@@ -763,19 +809,11 @@ class SettingsDialog(QDialog):
 
 
 def _rawview_mcp_launcher() -> str:
-    """
-    The command line that starts the MCP server for this installation.
+    """The MCP server command for this install, shell-quoted for display in the hint."""
+    from rawview.mcp import rawview_mcp_command
 
-    A pip install puts ``rawview-mcp`` on PATH. A packaged build has no console scripts and no
-    system Python, so it names this executable instead, which re-enters the MCP server through the
-    --mcp flag rather than opening a window.
-    """
-    if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" --mcp'
-    script = shutil.which("rawview-mcp")
-    if script:
-        return script
-    return f'"{sys.executable}" -m rawview.mcp.server'
+    argv = rawview_mcp_command()
+    return " ".join(a if " " not in a else f'"{a}"' for a in argv)
 
 
 def open_settings_dialog(parent, controller: RawViewQtController) -> bool:

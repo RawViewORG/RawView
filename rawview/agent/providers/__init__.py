@@ -55,6 +55,18 @@ class ProviderPreset:
 # matters most for local runners, where the catalogue is whatever the user pulled.
 PRESETS: tuple[ProviderPreset, ...] = (
     ProviderPreset(
+        id="claude_code",
+        label="Claude Code (your subscription, no API key)",
+        kind="claude_code",
+        base_url="",
+        requires_key=False,
+        suggested_model="",
+        hint=(
+            "Drives the agent through your signed-in Claude Code CLI - no Anthropic API key, no "
+            "terminal. Needs the `claude` CLI installed and 'Allow MCP clients' enabled below."
+        ),
+    ),
+    ProviderPreset(
         id="anthropic",
         label="Anthropic (Claude)",
         kind="anthropic",
@@ -151,6 +163,12 @@ def build_provider(settings: Any) -> LLMProvider:
     ``rawview.env`` files keep working untouched.
     """
     preset = preset_by_id(getattr(settings, "llm_provider", "anthropic"))
+
+    if preset.kind == "claude_code":
+        # Claude Code runs its own agent loop; the controller drives it directly, never through here.
+        raise ProviderError(
+            "Claude Code is not a chat provider; it is handled separately. This is a bug if you see it."
+        )
 
     if preset.kind == "anthropic":
         from rawview.agent.providers.anthropic_provider import AnthropicProvider

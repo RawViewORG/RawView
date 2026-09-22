@@ -159,6 +159,10 @@ class Settings(BaseSettings):
 
     # Lets Claude Code, Claude Desktop or any other MCP client drive this RawView window through
     # `rawview-mcp`, so the agent tools can be used without an Anthropic API key of one's own.
+    # Claude Code provider: use the signed-in `claude` CLI as the agent backend, no API key.
+    claude_code_path: str = Field(default="", validation_alias="CLAUDE_CODE_PATH")
+    # Blank lets Claude Code use its own default model; set e.g. "opus" or "sonnet" to pin one.
+    claude_code_model: str = Field(default="", validation_alias="CLAUDE_CODE_MODEL")
     rawview_mcp_enabled: bool = Field(default=False, validation_alias="RAWVIEW_MCP_ENABLED")
     # 0 asks the OS for a free port, which is written to mcp.json for the client to find.
     rawview_mcp_port: int = Field(default=0, validation_alias="RAWVIEW_MCP_PORT")
