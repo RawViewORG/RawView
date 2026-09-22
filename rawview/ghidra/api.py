@@ -383,6 +383,44 @@ class GhidraAPI:
         raw = str(self.bridge.invoke_java(lambda ep: ep.diffProgramsJson(int(limit))))
         return json.loads(raw)
 
+    def get_program_info(self) -> dict[str, Any]:
+        """One-call orientation: format, architecture, hashes, layout, counts."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.getProgramInfoJson()))
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+
+    def read_bytes(self, address: str, length: int = 16) -> dict[str, Any]:
+        """Raw bytes at ``address`` as hex (up to 4096)."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.readBytesJson(address, int(length))))
+        return json.loads(raw)
+
+    def get_function_variables(self, address: str) -> dict[str, Any]:
+        """Parameters and locals of a function, with types and storage."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.getFunctionVariablesJson(address)))
+        return json.loads(raw)
+
+    def define_data(self, address: str, type_name: str) -> dict[str, Any]:
+        """Define data of a named type at ``address`` (e.g. a dword, pointer, or struct)."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.defineDataJson(address, type_name)))
+        return json.loads(raw)
+
+    def get_comments(self, address: str) -> dict[str, Any]:
+        """Every comment set at ``address``, by type."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.getCommentsJson(address)))
+        return json.loads(raw)
+
+    def search_immediate(self, value: str, *, max_matches: int = 64) -> dict[str, Any]:
+        """Every instruction whose operand is the scalar ``value`` (decimal or 0x hex)."""
+        raw = str(
+            self.bridge.invoke_java(lambda ep: ep.searchImmediateJson(str(value), int(max_matches)))
+        )
+        return json.loads(raw)
+
+    def strings_in_function(self, address: str) -> dict[str, Any]:
+        """Strings referenced from within a function's body."""
+        raw = str(self.bridge.invoke_java(lambda ep: ep.stringsInFunctionJson(address)))
+        return json.loads(raw)
+
     def search_program(
         self, query: str, *, limit_per_kind: int = 50, kinds: str = ""
     ) -> dict[str, Any]:

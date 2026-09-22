@@ -225,6 +225,7 @@ __TOOL_PROTOCOL__
 - **`get_exports`**: The image's exported symbols (PE export directory / ELF dynamic symbols), each with `type` function or data.
 - **`get_entry_points`**: Where execution starts (`entry`, `_start`, `main`, `DllMain`, …), falling back to entry-point functions and then the image base.
 - **`list_work_notes`**: List Markdown files in the Work dock folder.
+- **`get_program_info`**: One-call orientation - format, CPU, endianness, pointer size, image base, hashes, counts. Call it first on an unfamiliar binary.
 - **`get_current_address`** / **`get_current_function`**: Where the user is actually looking in RawView, and the function containing it. Use these when they say "this function", "here" or "the current address" rather than guessing or asking them to repeat an address.
 - **`list_segments`**: Memory map - every block with permissions and whether it holds bytes. Tells code from data and shows whether an address is even mapped.
 - **`list_namespaces`**: Namespaces and classes (C++ classes, external libraries).
@@ -251,6 +252,12 @@ __TOOL_PROTOCOL__
 - **`set_function_signature`**: Set the prototype (return type, parameter names/types, calling convention). Usually the highest-leverage edit you can make - it improves the decompiled output of this function and its callers. `input`: `address`, `signature` (e.g. `int parse(char *buf, size_t len)`).
 - **`get_control_flow_graph`**: CFG metadata for a function. `input`: `address` (string).
 - **`get_function_at`**: Resolve any address to the function containing it (name, entry, signature, size). `input`: `address` (string). Use it before assuming an address is a function entry.
+- **`read_bytes`** / **`get_hex_dump`**: Raw bytes at an address as hex, or a formatted hex+ASCII dump. `input`: `address`; optional `length` (read_bytes) or `max_bytes`/`bytes_per_line` (get_hex_dump).
+- **`get_function_variables`**: Parameters and locals of a function with types and storage. `input`: `address`. Call before `rename_variable`/`set_local_variable_type` to use the exact names.
+- **`define_data`**: Define data of a C type at an address (mark a dword, pointer, string, or a struct laid down in memory). `input`: `address`, `type`. Modifies the program.
+- **`get_comments`**: Read back every comment at an address. `input`: `address`.
+- **`search_immediate`**: Every instruction using a given constant - a magic number, XOR key, port, size. `input`: `value` (decimal or 0x hex); optional `max_matches`. The way to answer 'where is this constant used'.
+- **`strings_in_function`**: Strings referenced from inside a function's body - fast triage of what it touches. `input`: `address`.
 - **`get_call_graph`**: Callers and/or callees around a function. `input`: `address` (string); optional `depth` (1-5, default 2), `direction` (`callers`, `callees`, `both`). Edges always point caller -> callee. Prefer this over walking `get_xrefs_to` by hand; big graphs come back capped with `truncated` set.
 - **`search_program`**: One substring search across functions, symbols, strings, imports, exports and data. `input`: `query` (string); optional `kinds` (comma-separated subset), `limit_per_kind`. Reach for this before listing a whole category and filtering yourself.
 - **`list_data_items`**: Labelled data with type and value. `input`: optional `offset`, `limit`.

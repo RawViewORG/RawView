@@ -284,6 +284,40 @@ def _build_registry(
     def get_control_flow_graph(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
         return json.dumps(api.get_control_flow_graph(str(inp["address"])))
 
+    def get_program_info(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(api.get_program_info())
+
+    def read_bytes(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(api.read_bytes(str(inp["address"]), int(inp.get("length", 16) or 16)))
+
+    def get_hex_dump(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        dump = api.get_hex_dump(
+            str(inp["address"]),
+            int(inp.get("max_bytes", 256) or 256),
+            int(inp.get("bytes_per_line", 16) or 16),
+        )
+        return json.dumps({"address": str(inp["address"]), "dump": dump})
+
+    def get_function_variables(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(api.get_function_variables(str(inp["address"])))
+
+    def define_data(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        res = api.define_data(str(inp["address"]), str(inp["type"]))
+        if emit_fn is not None and res.get("ok"):
+            emit_fn("ghidra_shell_refresh", {})
+        return json.dumps(res)
+
+    def get_comments(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(api.get_comments(str(inp["address"])))
+
+    def search_immediate(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(
+            api.search_immediate(str(inp["value"]), max_matches=int(inp.get("max_matches", 64) or 64))
+        )
+
+    def strings_in_function(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
+        return json.dumps(api.strings_in_function(str(inp["address"])))
+
     def get_function_at(inp: dict[str, Any], api: GhidraAPI, _nav: Callable[[str], None]) -> str:
         return json.dumps(api.get_function_at(str(inp["address"])))
 
@@ -981,6 +1015,116 @@ def _build_registry(
                 "required": ["query"],
             },
             handler=web_search,
+        ),
+        RegisteredTool(
+            name="get_program_info",
+            description=(
+                "One-call orientation for the loaded program: file format, CPU/architecture, "
+                "endianness, pointer size, image base, address range, compiler, MD5/SHA-256, and "
+                "function/symbol counts. Call this first when you open something unfamiliar."
+            ),
+            parameters_schema={"type": "object", "properties": {}},
+            handler=get_program_info,
+        ),
+        RegisteredTool(
+            name="read_bytes",
+            description=(
+                "Raw bytes at an address as a hex string (up to 4096). Use for headers, tables, or "
+                "data the decompiler shows as bytes; get_hex_dump is the formatted view."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "Address to read from."},
+                    "length": {"type": "integer", "description": "Bytes to read (default 16, max 4096)."},
+                },
+                "required": ["address"],
+            },
+            handler=read_bytes,
+        ),
+        RegisteredTool(
+            name="get_hex_dump",
+            description="Formatted hex+ASCII dump at an address. `input`: address; optional max_bytes, bytes_per_line.",
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "Address to dump from."},
+                    "max_bytes": {"type": "integer", "description": "Bytes to show (default 256)."},
+                    "bytes_per_line": {"type": "integer", "description": "Columns (default 16)."},
+                },
+                "required": ["address"],
+            },
+            handler=get_hex_dump,
+        ),
+        RegisteredTool(
+            name="get_function_variables",
+            description=(
+                "Parameters and locals of a function, each with its type and storage. Call before "
+                "rename_variable or set_local_variable_type so you use the exact names Ghidra has."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {"address": {"type": "string", "description": "Function entry or any address in it."}},
+                "required": ["address"],
+            },
+            handler=get_function_variables,
+        ),
+        RegisteredTool(
+            name="define_data",
+            description=(
+                "Define data of a named C type at an address - mark a dword, a pointer, a string, or "
+                "a struct laid down in memory. `type` is C text like 'int', 'char *', 'dword', or a "
+                "struct name already created with create_struct. Modifies the program."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "Where to define the data."},
+                    "type": {"type": "string", "description": "C type, e.g. 'int', 'char[16]', 'void *'."},
+                },
+                "required": ["address", "type"],
+            },
+            handler=define_data,
+        ),
+        RegisteredTool(
+            name="get_comments",
+            description="Read back every comment at an address (EOL, PRE, POST, PLATE, REPEATABLE).",
+            parameters_schema={
+                "type": "object",
+                "properties": {"address": {"type": "string", "description": "Address to read comments at."}},
+                "required": ["address"],
+            },
+            handler=get_comments,
+        ),
+        RegisteredTool(
+            name="search_immediate",
+            description=(
+                "Find every instruction whose operand is a given constant - a magic number, XOR key, "
+                "port, or size. `value` is decimal or 0x-prefixed hex; matches both signed and "
+                "unsigned readings. The direct way to answer 'where is this constant used'."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string", "description": "Constant to find, e.g. '0xdeadbeef' or '4919'."},
+                    "max_matches": {"type": "integer", "description": "Cap (default 64, max 300)."},
+                },
+                "required": ["value"],
+            },
+            handler=search_immediate,
+        ),
+        RegisteredTool(
+            name="strings_in_function",
+            description=(
+                "The strings referenced from within one function's body - fast triage of what a "
+                "function touches (URLs, file paths, registry keys, error text) without reading it all."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {"address": {"type": "string", "description": "Function entry or any address in it."}},
+                "required": ["address"],
+            },
+            handler=strings_in_function,
         ),
         RegisteredTool(
             name="get_function_at",

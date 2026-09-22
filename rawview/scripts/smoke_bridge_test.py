@@ -165,6 +165,23 @@ def _check_engine(api: "GhidraAPI", test_bin: str = "") -> list[str]:  # noqa: F
     renamed = api.rename_function(addr, "rawview_smoke_renamed")
     check("rename_function", bool(renamed.get("ok")), renamed)
 
+    info = api.get_program_info()
+    check(
+        "get_program_info",
+        bool(info.get("format")) and info.get("function_count", 0) > 0,
+        {k: info.get(k) for k in ("format", "processor", "pointer_size")},
+    )
+    rb = api.read_bytes(info.get("image_base", addr), 8)
+    check("read_bytes", rb.get("length", 0) > 0 and bool(rb.get("hex")), rb.get("hex"))
+    fvars = api.get_function_variables(addr)
+    check("get_function_variables", "parameters" in fvars and "locals" in fvars,
+          {"params": len(fvars.get("parameters", [])), "locals": len(fvars.get("locals", []))})
+    api.set_comment(addr, "smoke plate", "PLATE")
+    check("get_comments", api.get_comments(addr).get("comments", {}).get("plate") == "smoke plate", "read back")
+    check("strings_in_function", "strings" in api.strings_in_function(addr), "ok")
+    check("search_immediate_rejects_garbage",
+          api.search_immediate("notanumber").get("error") == "bad_value", "rejected")
+
     # One query across every listing, and the kind filter that narrows it.
     found = api.search_program(target["name"][:6], limit_per_kind=5)
     check(

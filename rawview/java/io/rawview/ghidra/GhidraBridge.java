@@ -1832,6 +1832,287 @@ public class GhidraBridge {
         return sb.toString();
     }
 
+
+    /** Longest raw byte read and immediate/string scan, so one call cannot marshal a program. */
+    private static final int MAX_READ_BYTES = 4096;
+    private static final int MAX_SCAN_MATCHES = 300;
+
+    /**
+     * One-call orientation for a freshly opened program: format, architecture, hashes, layout.
+     *
+     * <p>Answers the questions the agent otherwise pieces together from several calls - what am I
+     * looking at, what CPU, where does it load, how big - in a single response.
+     */
+    public synchronized String getProgramInfoJson() throws Exception {
+        ensureProgram();
+        FunctionManager fm = program.getFunctionManager();
+        int funcs = 0;
+        FunctionIterator it = fm.getFunctions(true);
+        while (it.hasNext()) {
+            it.next();
+            funcs++;
+        }
+        boolean analyzed = GhidraProgramUtilities.isAnalyzed(program);
+        StringBuilder sb = new StringBuilder("{");
+        sb.append("\"name\":\"").append(escapeJson(program.getName())).append('"')
+          .append(",\"path\":\"").append(escapeJson(safe(program.getExecutablePath()))).append('"')
+          .append(",\"format\":\"").append(escapeJson(safe(program.getExecutableFormat()))).append('"')
+          .append(",\"language\":\"").append(escapeJson(program.getLanguageID().getIdAsString())).append('"')
+          .append(",\"processor\":\"")
+          .append(escapeJson(program.getLanguage().getProcessor().toString())).append('"')
+          .append(",\"endian\":\"").append(program.getLanguage().isBigEndian() ? "big" : "little").append('"')
+          .append(",\"pointer_size\":").append(program.getDefaultPointerSize())
+          .append(",\"image_base\":\"").append(escapeJson(program.getImageBase().toString())).append('"')
+          .append(",\"min_address\":\"").append(escapeJson(program.getMinAddress().toString())).append('"')
+          .append(",\"max_address\":\"").append(escapeJson(program.getMaxAddress().toString())).append('"')
+          .append(",\"compiler\":\"").append(escapeJson(safe(program.getCompiler()))).append('"')
+          .append(",\"md5\":\"").append(escapeJson(safe(program.getExecutableMD5()))).append('"')
+          .append(",\"sha256\":\"").append(escapeJson(safe(program.getExecutableSHA256()))).append('"')
+          .append(",\"function_count\":").append(funcs)
+          .append(",\"symbol_count\":").append(program.getSymbolTable().getNumSymbols())
+          .append(",\"analyzed\":").append(analyzed)
+          .append('}');
+        return sb.toString();
+    }
+
+    private static String safe(String s) {
+        return s == null ? "" : s;
+    }
+
+    /** Raw bytes at an address as a hex string (up to {@link #MAX_READ_BYTES}). */
+    public synchronized String readBytesJson(String addressText, int length) throws Exception {
+        ensureProgram();
+        Address addr = parseAddress(addressText);
+        if (addr == null) {
+            return "{\"error\":\"invalid_address\"}";
+        }
+        int n = length <= 0 ? 16 : Math.min(length, MAX_READ_BYTES);
+        byte[] buf = new byte[n];
+        int read = readBytesBestEffort(program.getMemory(), addr, buf);
+        if (read <= 0) {
+            return "{\"error\":\"unreadable\",\"hint\":\"no initialized bytes at this address\"}";
+        }
+        StringBuilder hex = new StringBuilder(read * 2);
+        for (int i = 0; i < read; i++) {
+            hex.append(Character.forDigit((buf[i] >> 4) & 0xF, 16));
+            hex.append(Character.forDigit(buf[i] & 0xF, 16));
+        }
+        return "{\"address\":\"" + escapeJson(addr.toString()) + "\",\"length\":" + read
+                + ",\"truncated\":" + (read < n || n < length) + ",\"hex\":\"" + hex + "\"}";
+    }
+
+    /** Parameters and locals of a function, with types and storage - what to rename or retype. */
+    public synchronized String getFunctionVariablesJson(String addressText) throws Exception {
+        ensureProgram();
+        Function f = resolveFunction(addressText);
+        if (f == null) {
+            return "{\"error\":\"no_function\"}";
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"function\":\"").append(escapeJson(f.getName()))
+          .append("\",\"address\":\"").append(escapeJson(f.getEntryPoint().toString()))
+          .append("\",\"signature\":\"")
+          .append(escapeJson(f.getSignature() == null ? "" : f.getSignature().getPrototypeString()))
+          .append("\",\"parameters\":[");
+        boolean first = true;
+        for (Variable v : f.getParameters()) {
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            appendVariable(sb, v.getName(), v.getDataType() == null ? "" : v.getDataType().getName(),
+                    v.getVariableStorage() == null ? "" : v.getVariableStorage().toString());
+        }
+        sb.append("],\"locals\":[");
+        first = true;
+        for (Variable v : f.getLocalVariables()) {
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            appendVariable(sb, v.getName(), v.getDataType() == null ? "" : v.getDataType().getName(),
+                    v.getVariableStorage() == null ? "" : v.getVariableStorage().toString());
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    private static void appendVariable(StringBuilder sb, String name, String type, String storage) {
+        sb.append("{\"name\":\"").append(escapeJson(name)).append('"')
+          .append(",\"type\":\"").append(escapeJson(type)).append('"')
+          .append(",\"storage\":\"").append(escapeJson(storage)).append("\"}");
+    }
+
+    /** Defines data of a named type at an address (e.g. mark a dword, pointer, or a struct). */
+    public synchronized String defineDataJson(String addressText, String typeName) throws Exception {
+        ensureProgram();
+        Address addr = parseAddress(addressText);
+        if (addr == null) {
+            return "{\"error\":\"invalid_address\"}";
+        }
+        String wanted = typeName == null ? "" : typeName.trim();
+        if (wanted.isEmpty()) {
+            return "{\"error\":\"empty_type\"}";
+        }
+        DataType dt;
+        try {
+            dt = new CParser(program.getDataTypeManager()).parse(wanted + " x;");
+        } catch (Exception e) {
+            return "{\"error\":\"bad_type\",\"hint\":\"" + escapeJson(shortMessage(e)) + "\"}";
+        }
+        if (dt == null) {
+            return "{\"error\":\"bad_type\",\"hint\":\"" + escapeJson(wanted) + " did not parse\"}";
+        }
+        final DataType applied = dt;
+        try {
+            return inTransaction("Define data", () -> {
+                int len = applied.getLength();
+                if (len > 0) {
+                    Address end = addr.add(len - 1L);
+                    program.getListing().clearCodeUnits(addr, end, false);
+                }
+                Data d = program.getListing().createData(addr, applied);
+                return "{\"ok\":true,\"address\":\"" + escapeJson(addr.toString()) + "\",\"type\":\""
+                        + escapeJson(d.getDataType().getName()) + "\",\"length\":" + d.getLength() + "}";
+            });
+        } catch (Exception e) {
+            return "{\"error\":\"define_failed\",\"hint\":\"" + escapeJson(shortMessage(e)) + "\"}";
+        }
+    }
+
+    /** Every comment set at an address, by type. */
+    public synchronized String getCommentsJson(String addressText) throws Exception {
+        ensureProgram();
+        Address addr = parseAddress(addressText);
+        if (addr == null) {
+            return "{\"error\":\"invalid_address\"}";
+        }
+        Listing listing = program.getListing();
+        StringBuilder sb = new StringBuilder("{\"address\":\"").append(escapeJson(addr.toString()))
+                .append("\",\"comments\":{");
+        boolean first = true;
+        for (CommentType ct : new CommentType[] {
+                CommentType.EOL, CommentType.PRE, CommentType.POST, CommentType.PLATE,
+                CommentType.REPEATABLE}) {
+            String c = listing.getComment(ct, addr);
+            if (c == null || c.isEmpty()) {
+                continue;
+            }
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            sb.append('"').append(ct.name().toLowerCase(Locale.US)).append("\":\"")
+              .append(escapeJson(c)).append('"');
+        }
+        sb.append("}}");
+        return sb.toString();
+    }
+
+    /**
+     * Every instruction whose operand is the scalar {@code value}: finds where a constant is used.
+     *
+     * <p>The RE workhorse for a magic number, a XOR key, a port, a size - "where does this value
+     * appear in the code". {@code value} is decimal or {@code 0x}-prefixed hex. Matches both the
+     * signed and unsigned reading of each operand.
+     */
+    public synchronized String searchImmediateJson(String valueText, int maxMatches) throws Exception {
+        ensureProgram();
+        long value;
+        try {
+            String t = valueText == null ? "" : valueText.trim();
+            if (t.regionMatches(true, 0, "0x", 0, 2)) {
+                value = Long.parseUnsignedLong(t.substring(2).replace("_", ""), 16);
+            } else {
+                value = Long.parseLong(t.replace("_", ""));
+            }
+        } catch (Exception e) {
+            return "{\"error\":\"bad_value\",\"hint\":\"decimal or 0x-prefixed hex\"}";
+        }
+        int cap = maxMatches <= 0 ? 64 : Math.min(maxMatches, MAX_SCAN_MATCHES);
+        FunctionManager fm = program.getFunctionManager();
+        StringBuilder sb = new StringBuilder("{\"value\":").append(value).append(",\"matches\":[");
+        int found = 0;
+        boolean first = true;
+        InstructionIterator it = program.getListing().getInstructions(true);
+        while (it.hasNext() && found < cap) {
+            Instruction ins = it.next();
+            boolean hit = false;
+            for (int op = 0; op < ins.getNumOperands() && !hit; op++) {
+                Object[] parts;
+                try {
+                    parts = ins.getOpObjects(op);
+                } catch (Exception ignored) {
+                    continue;
+                }
+                for (Object part : parts) {
+                    if (part instanceof Scalar sc
+                            && (sc.getValue() == value || sc.getUnsignedValue() == value)) {
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+            if (!hit) {
+                continue;
+            }
+            Function f = fm.getFunctionContaining(ins.getAddress());
+            if (!first) {
+                sb.append(',');
+            }
+            first = false;
+            found++;
+            sb.append("{\"address\":\"").append(escapeJson(ins.getAddress().toString())).append('"')
+              .append(",\"function\":\"").append(escapeJson(f == null ? "" : f.getName())).append('"')
+              .append(",\"text\":\"").append(escapeJson(ins.toString())).append("\"}");
+        }
+        sb.append("],\"count\":").append(found).append(",\"truncated\":").append(it.hasNext() && found >= cap)
+          .append('}');
+        return sb.toString();
+    }
+
+    /** Strings referenced from within a function's body - fast triage of what it touches. */
+    public synchronized String stringsInFunctionJson(String addressText) throws Exception {
+        ensureProgram();
+        Function f = resolveFunction(addressText);
+        if (f == null) {
+            return "{\"error\":\"no_function\"}";
+        }
+        Listing listing = program.getListing();
+        ReferenceManager rm = program.getReferenceManager();
+        Set<String> seen = new HashSet<>();
+        StringBuilder sb = new StringBuilder("{\"function\":\"").append(escapeJson(f.getName()))
+                .append("\",\"strings\":[");
+        boolean first = true;
+        InstructionIterator it = listing.getInstructions(f.getBody(), true);
+        while (it.hasNext()) {
+            Instruction ins = it.next();
+            for (Reference ref : rm.getReferencesFrom(ins.getAddress())) {
+                Address to = ref.getToAddress();
+                if (to == null) {
+                    continue;
+                }
+                Data d = listing.getDataAt(to);
+                if (d == null || !d.hasStringValue()) {
+                    continue;
+                }
+                if (!seen.add(to.toString())) {
+                    continue;
+                }
+                if (!first) {
+                    sb.append(',');
+                }
+                first = false;
+                sb.append("{\"address\":\"").append(escapeJson(to.toString())).append('"')
+                  .append(",\"from\":\"").append(escapeJson(ins.getAddress().toString())).append('"')
+                  .append(",\"value\":\"")
+                  .append(escapeJson(truncateValue(d.getDefaultValueRepresentation()))).append("\"}");
+            }
+        }
+        sb.append("],\"count\":").append(seen.size()).append('}');
+        return sb.toString();
+    }
+
     /** Result cap per kind for {@link #searchProgramJson}, so one broad query cannot return a program. */
     private static final int MAX_SEARCH_HITS_PER_KIND = 200;
 
