@@ -140,6 +140,8 @@ class ClaudeCodeSession:
     def run_turn(self, prompt: str, *, emit: EmitFn) -> None:
         """Run one user turn to completion, translating Claude Code's events to dock events."""
         self._interrupt.clear()
+        self._thinking_accum = ""
+        self._streaming_text = False
         argv = self._build_argv(prompt)
         logger.info("claude-code: %s", " ".join(argv[:6]) + " ...")
         try:
@@ -186,7 +188,7 @@ class ClaudeCodeSession:
                 proc.wait(timeout=5)
             except Exception:
                 logger.debug("claude terminate on interrupt", exc_info=True)
-            emit("agent_stopped", {"reason": "interrupted"})
+            # The controller emits the terminal event (agent_stopped) so it is not sent twice.
             self._proc = None
             return
         try:
@@ -309,6 +311,8 @@ class ClaudeCodeSession:
             if block.get("type") == "text":
                 emit("assistant_stream_begin", {})
                 self._streaming_text = True
+            elif block.get("type") == "thinking":
+                self._thinking_accum = ""
             return
         if kind == "content_block_delta":
             delta = sse.get("delta") or {}
@@ -316,7 +320,10 @@ class ClaudeCodeSession:
             if dtype == "text_delta":
                 emit("assistant_text_delta", {"text": str(delta.get("text", ""))})
             elif dtype == "thinking_delta":
-                emit("assistant_thinking_live", {"text": str(delta.get("thinking", ""))})
+                # Accumulate: the indicator should show the growing thought, not one lone chunk.
+                self._thinking_accum += str(delta.get("thinking", ""))
+                if self._thinking_accum.strip():
+                    emit("assistant_thinking_live", {"text": self._thinking_accum})
             return
         if kind == "content_block_stop" and getattr(self, "_streaming_text", False):
             # The committed, markdown-rendered version arrives with the whole assistant message.

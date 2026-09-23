@@ -903,6 +903,16 @@ def agent_feed_document_default_stylesheet(theme_id: str) -> str:
         f"code{{font-family:Consolas,monospace;background:{c.html_code_bg};padding:1px 4px;"
         f"font-size:9.5pt;}}"
         f"pre{{background:{c.html_code_bg};padding:8px;}}"
+        # tool cards: a gear glyph + name, quieter than a timestamped label
+        f".rvtoolglyph{{color:{c.html_link};font-weight:bold;}}"
+        # error and stopped notices
+        f".rverror{{color:{c.html_notice};background:{c.thinking_bg};border-left:3px solid #f7768e;"
+        f"padding:8px 12px;margin:8px 0;}}"
+        ".rverrglyph{color:#f7768e;font-weight:bold;}"
+        f".rvstopped{{color:{c.html_meta};font-size:9pt;font-style:italic;padding:4px 0;}}"
+        # a role chip: small, colored, sits before the message body
+        f".rvrole{{color:{c.html_link};font-weight:bold;font-size:9pt;}}"
+        f".rvrole-user{{color:{c.html_meta};font-weight:bold;font-size:9pt;}}"
     )
 
 

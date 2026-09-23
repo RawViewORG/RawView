@@ -89,6 +89,39 @@ from rawview.qt_ui.work_dock import WorkDockPanel
 _UI_STATE_VERSION = 2
 
 
+def _inline_html(inner: str) -> str:
+    """
+    Flatten Qt's block-level markdown HTML into inline HTML that renders inside a message card.
+
+    QTextBrowser drops every card after one that nests a block element (``<p>``, ``<ul>``, ``<pre>``)
+    inside its ``<div>``, so the whole feed collapses to the first message. Converting blocks to
+    inline runs with ``<br/>`` breaks keeps the card intact while preserving bold/italic/links/code.
+    """
+    t = inner
+    t = re.sub(r"(?is)<style.*?</style>", "", t)
+    t = t.replace("<!--StartFragment-->", "").replace("<!--EndFragment-->", "")
+    # headings -> bold line
+    t = re.sub(r"(?is)<h[1-6][^>]*>", "<b>", t)
+    t = re.sub(r"(?is)</h[1-6]>", "</b><br/>", t)
+    # list items -> bulleted lines; drop the list containers
+    t = re.sub(r"(?is)<li[^>]*>", "• ", t)
+    t = re.sub(r"(?is)</li>", "<br/>", t)
+    t = re.sub(r"(?is)</?(ul|ol)[^>]*>", "", t)
+    # code blocks -> inline monospace, newlines kept as breaks
+    def _pre(mm):
+        body = re.sub(r"(?is)<[^>]+>", "", mm.group(1))
+        return '<br/><span style="font-family:Consolas,monospace;">' + body.replace("\n", "<br/>") + "</span><br/>"
+    t = re.sub(r"(?is)<pre[^>]*>(.*?)</pre>", _pre, t)
+    # paragraphs -> break-separated inline
+    t = re.sub(r"(?is)<p[^>]*>", "", t)
+    t = re.sub(r"(?is)</p>", "<br/>", t)
+    # blockquotes / divs -> nothing structural
+    t = re.sub(r"(?is)</?(blockquote|div)[^>]*>", "", t)
+    # collapse trailing breaks
+    t = re.sub(r"(?:<br/>\s*){3,}", "<br/><br/>", t)
+    return t.strip().removesuffix("<br/>").strip()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, *, no_agent: bool = False) -> None:
         super().__init__()
@@ -112,10 +145,9 @@ class MainWindow(QMainWindow):
         self._spotlight_overlay: QWidget | None = None
         self._agent_feed_html_chunks: list[str] = []
         self._agent_tool_expand_html: dict[str, str] = {}
-        # Streaming-into-feed state
-        self._stream_start_pos: int = -1
-        self._stream_ts: str = ""
-        self._stream_plain_parts: list[str] = []
+        # Streaming-into-feed state (setHtml rebuild model)
+        self._stream_active: bool = False
+        self._stream_text: str = ""
         # Image attachment
         self._pending_images: list[dict] = []
         # Generation state
@@ -188,8 +220,10 @@ class MainWindow(QMainWindow):
     def _clear_agent_feed(self) -> None:
         if self._no_agent:
             return
-        self._stream_start_pos = -1
-        self._stream_plain_parts = []
+        self._stream_active = False
+        self._stream_text = ""
+        if hasattr(self, "_stream_render_timer"):
+            self._stream_render_timer.stop()
         self._agent_generating = False
         self._btn_send_stop.setIcon(qta.icon("fa6s.paper-plane", color="#7aa2f7"))
         self._btn_send_stop.setText("Send")
@@ -197,39 +231,53 @@ class MainWindow(QMainWindow):
         self._thinking_indicator.setVisible(False)
         self._chat_title = ""
         self._chat_title_label.setText("")
-        self._agent_feed.clear()
         self._agent_feed_html_chunks.clear()
         self._agent_tool_expand_html.clear()
-        self._setup_agent_feed_html()
+        self._render_agent_feed()
         self._show_feed_stack(welcome=True)
 
-    def _append_agent_html(self, fragment: str) -> None:
+    def _render_agent_feed(self, *, preserve_scroll: bool = False) -> None:
+        """
+        Rebuild the whole feed with setHtml.
+
+        QTextBrowser drops class-based styling and merges blocks when fragments are added with
+        insertHtml + setDefaultStyleSheet - the message cards and role chips never actually
+        applied. Rendering the entire feed as one document with an inline <style> is the only way
+        Qt resolves the classes, so the feed is rebuilt from the stored chunks (plus the live
+        streaming card, if any) on each change.
+        """
         if self._no_agent:
             return
-        self._agent_feed.moveCursor(QTextCursor.MoveOperation.End)
-        self._agent_feed.insertHtml(fragment + "<br/>")
-        self._agent_feed.moveCursor(QTextCursor.MoveOperation.End)
+        bar = self._agent_feed.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        prev = bar.value()
+        parts = list(self._agent_feed_html_chunks)
+        if getattr(self, "_stream_active", False):
+            body = html.escape(self._stream_text).replace("\n", "<br/>")
+            parts.append(
+                '<div class="rva"><span class="rvavatar">◆</span>'
+                ' <span class="rvrole">Assistant</span><br/>' + body + "</div>"
+            )
+        css = agent_feed_document_default_stylesheet(self._ctrl.settings.rawview_theme)
+        self._agent_feed.setHtml(f"<html><head><style>{css}</style></head><body>{''.join(parts)}</body></html>")
+        if preserve_scroll and not at_bottom:
+            bar.setValue(min(prev, bar.maximum()))
+        else:
+            bar.setValue(bar.maximum())
 
     def _append_feed_html(self, fragment: str) -> None:
         if self._no_agent:
             return
-        self._append_agent_html(fragment)
         self._agent_feed_html_chunks.append(fragment)
+        self._render_agent_feed()
 
     def _replay_feed_html_chunks(self, chunks: list[str], *, preserve_scroll: bool = False) -> None:
         if self._no_agent:
             return
-        bar = self._agent_feed.verticalScrollBar()
-        prev = bar.value() if preserve_scroll else None
-        self._agent_feed.clear()
-        self._setup_agent_feed_html()
         self._agent_feed_html_chunks = list(chunks)
         if chunks:
             self._show_feed_stack(welcome=False)
-        for fragment in chunks:
-            self._append_agent_html(fragment)
-        if preserve_scroll and prev is not None:
-            bar.setValue(min(prev, bar.maximum()))
+        self._render_agent_feed(preserve_scroll=preserve_scroll)
 
     def _materialize_collapsed_tool_chunks(self, chunks: list[str]) -> list[str]:
         """Replace fold links with full tool HTML so saved archives stay readable offline."""
@@ -247,12 +295,22 @@ class MainWindow(QMainWindow):
         return out
 
     def _assistant_body_from_markdown(self, text: str) -> str:
+        """
+        Markdown -> inline HTML that nests inside a message card.
+
+        ``QTextDocumentFragment.toHtml`` returns a whole HTML *document* (its own <head>, <style>
+        and <body>); dropped inside our ``<div class="rva">`` card that resets the card's styling
+        and the role chip, so the feed collapses into one undifferentiated blob. Strip the wrapper
+        and the document <style> so only the body's inner markup remains and the card CSS applies.
+        """
         try:
             frag = QTextDocumentFragment.fromMarkdown(text)
-            return frag.toHtml()
+            full = frag.toHtml()
         except (AttributeError, TypeError):
-            esc = html.escape
-            return esc(text).replace("\n", "<br/>")
+            return html.escape(text).replace("\n", "<br/>")
+        m = re.search(r"<body[^>]*>(.*)</body>", full, re.DOTALL | re.IGNORECASE)
+        inner = m.group(1) if m else full
+        return _inline_html(inner)
 
     def _on_agent_feed_anchor(self, url: QUrl) -> None:
         if url.scheme() != "rvexpand":
@@ -657,6 +715,11 @@ class MainWindow(QMainWindow):
         self._agent_feed.setOpenExternalLinks(False)
         self._agent_feed.anchorClicked.connect(self._on_agent_feed_anchor)
         self._agent_feed.setPlaceholderText("Agent activity (tools, results) streams here when enabled.")
+        # Throttles the setHtml rebuild while streaming so token bursts do not thrash the renderer.
+        self._stream_render_timer = QTimer(self)
+        self._stream_render_timer.setSingleShot(True)
+        self._stream_render_timer.setInterval(60)
+        self._stream_render_timer.timeout.connect(lambda: self._render_agent_feed(preserve_scroll=False))
         # A welcome card sits in front of the empty feed and steps aside on the first message.
         self._agent_welcome = AgentWelcome(self._run_prompt_from_chip)
         self._agent_feed_stack = QStackedWidget()
@@ -948,6 +1011,7 @@ class MainWindow(QMainWindow):
         if not self._no_agent:
             self._refresh_provider_chip()
             self._activity_bar.set_accent(self._agent_accent_color())
+            self._render_agent_feed(preserve_scroll=True)
 
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -1855,31 +1919,19 @@ class MainWindow(QMainWindow):
                 self._chat_title_label.setText(f"- {esc(title)}")
             return
         if kind == "assistant_stream_begin":
-            self._stream_ts = ts
-            self._stream_plain_parts = []
-            self._stream_start_pos = -1  # header inserted on first text delta
+            self._stream_active = True
+            self._stream_text = ""
+            self._render_agent_feed()
             return
         if kind == "assistant_text_delta":
             chunk = str(data.get("text", ""))
             if not chunk:
                 return
             self._activity_bar.set_status("Writing")
-            if self._stream_start_pos < 0:
-                # Insert the assistant bubble header on first delta
-                cursor = self._agent_feed.textCursor()
-                cursor.movePosition(QTextCursor.MoveOperation.End)
-                self._stream_start_pos = cursor.position()
-                cursor.insertHtml(
-                    f'<div class="rva"><span class="rvavatar">◆</span>'
-                    f' <span class="rvmeta">[{esc(self._stream_ts)}] assistant</span><br/></div>'
-                )
-                self._agent_feed.setTextCursor(cursor)
-            self._stream_plain_parts.append(chunk)
-            cursor = self._agent_feed.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            cursor.insertText(chunk)
-            self._agent_feed.setTextCursor(cursor)
-            self._agent_feed.ensureCursorVisible()
+            self._stream_active = True
+            self._stream_text += chunk
+            # Throttle the setHtml rebuild so token bursts do not thrash the renderer.
+            self._stream_render_timer.start()
             return
         if kind == "assistant_thinking_live":
             raw = str(data.get("text", ""))
@@ -1895,31 +1947,17 @@ class MainWindow(QMainWindow):
         if kind == "assistant_stream_commit":
             text = str(data.get("text", ""))
             src = str(data.get("source", "agent"))
-            label = "/summarize (result)" if src == "summarize" else "assistant"
+            self._stream_render_timer.stop()
+            self._stream_active = False
+            self._stream_text = ""
             self._thinking_indicator.clear()
             self._thinking_indicator.setVisible(False)
-            if self._stream_start_pos >= 0:
-                # Replace streamed plain text with formatted markdown HTML
-                cursor = self._agent_feed.textCursor()
-                cursor.setPosition(self._stream_start_pos)
-                cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
-                cursor.removeSelectedText()
-                body = self._assistant_body_from_markdown(text)
-                frag = (
-                    f'<div class="rva"><span class="rvavatar">◆</span>'
-                    f' <span class="rvmeta">[{esc(self._stream_ts)}] {esc(label)}</span><br/>{body}</div>'
-                )
-                cursor.insertHtml(frag)
-                self._agent_feed_html_chunks.append(frag)
-                self._stream_start_pos = -1
-                self._agent_feed.moveCursor(QTextCursor.MoveOperation.End)
-            else:
-                body = self._assistant_body_from_markdown(text)
-                self._append_feed_html(
-                    f'<div class="rva"><span class="rvavatar">◆</span>'
-                    f' <span class="rvmeta">[{esc(ts)}] {esc(label)}</span><br/>{body}</div>'
-                )
-            self._stream_plain_parts = []
+            role = "/summarize" if src == "summarize" else "Assistant"
+            body = self._assistant_body_from_markdown(text)
+            self._append_feed_html(
+                f'<div class="rva"><span class="rvavatar">◆</span>'
+                f' <span class="rvrole">{esc(role)}</span><br/>{body}</div>'
+            )
             return
         if kind == "agent_notice":
             note = esc(str(data.get("message", "")))
@@ -1953,20 +1991,19 @@ class MainWindow(QMainWindow):
         if kind == "assistant_thinking":
             body = self._assistant_body_from_markdown(str(data.get("text", "")))
             self._append_feed_html(
-                f'<div class="rvt"><span class="rvmeta">[{esc(ts)}] 💭 thinking</span><br/>{body}</div>'
+                f'<div class="rvt"><span class="rvrole">💭 Thinking</span><br/>{body}</div>'
             )
             return
         if kind == "assistant_text":
             body = self._assistant_body_from_markdown(str(data.get("text", "")))
             self._append_feed_html(
                 f'<div class="rva"><span class="rvavatar">◆</span>'
-                f' <span class="rvmeta">[{esc(ts)}] assistant</span><br/>{body}</div>'
+                f' <span class="rvrole">Assistant</span><br/>{body}</div>'
             )
             return
         if kind == "tool_call":
             name = esc(str(data.get("name", "")))
             self._activity_bar.set_status(f"Running {data.get('name', 'tool')!s}")
-            tid = esc(str(data.get("id", "")))
             inp = data.get("input", {})
             try:
                 inp_s = json.dumps(inp, indent=2, ensure_ascii=False)
@@ -1974,15 +2011,18 @@ class MainWindow(QMainWindow):
                 inp_s = str(inp)
             inp_h = esc(inp_s)
             uid = uuid.uuid4().hex
+            # One-line arg summary so the common case reads at a glance without expanding.
+            summary = ", ".join(f"{k}={v}" for k, v in inp.items()) if isinstance(inp, dict) else ""
+            summary = esc(summary[:80] + ("…" if len(summary) > 80 else ""))
+            summary_html = f' <span class="rvmeta">{summary}</span>' if summary else ""
             expanded = (
-                f'<div class="rvtool"><span class="rvmeta">[{esc(ts)}] tool call</span> '
-                f'<b>{name}</b> <span class="rvmeta">id={tid}</span>'
+                f'<div class="rvtool"><span class="rvtoolglyph">&#9881;</span> <b>{name}</b>'
                 f'<pre class="rvpre">{inp_h}</pre></div>'
             )
             collapsed = (
-                f'<div class="rvtool rvtool-fold"><span class="rvmeta">[{esc(ts)}] tool call</span> '
-                f'<b>{name}</b> <span class="rvmeta">id={tid}</span> '
-                f'<a class="rvlink" href="rvexpand:?uid={uid}">Uncollapse</a></div>'
+                f'<div class="rvtool rvtool-fold"><span class="rvtoolglyph">&#9881;</span> '
+                f'<b>{name}</b>{summary_html} '
+                f'<a class="rvlink" href="rvexpand:?uid={uid}">details</a></div>'
             )
             self._agent_tool_expand_html[uid] = expanded
             self._append_feed_html(collapsed)
@@ -2039,34 +2079,36 @@ class MainWindow(QMainWindow):
                     self._agent_tool_expand_html[uid] = expanded
                     self._append_feed_html(collapsed)
                     return
-            short = prev_esc[:280] + ("…" if len(prev_esc) > 280 else "")
+            short = prev_esc[:220] + ("…" if len(prev_esc) > 220 else "")
             uid = uuid.uuid4().hex
             expanded = (
-                f'<div class="rvtool"><span class="rvmeta">[{esc(ts)}] tool result</span> <b>{name}</b>'
+                f'<div class="rvtool"><span class="rvtoolglyph">&#8592;</span> <b>{name}</b>'
                 f'<pre class="rvpre">{prev_esc}</pre></div>'
             )
             collapsed = (
-                f'<div class="rvtool rvtool-fold"><span class="rvmeta">[{esc(ts)}] tool result</span> <b>{name}</b>'
+                f'<div class="rvtool rvtool-fold"><span class="rvtoolglyph">&#8592;</span> <b>{name}</b>'
                 f'<div class="rvmeta" style="margin:4px 0;">{short}</div>'
-                f'<a class="rvlink" href="rvexpand:?uid={uid}">Uncollapse full output</a></div>'
+                f'<a class="rvlink" href="rvexpand:?uid={uid}">details</a></div>'
             )
             self._agent_tool_expand_html[uid] = expanded
             self._append_feed_html(collapsed)
             self._activity_bar.set_status("Thinking")
             return
         if kind in ("agent_done", "agent_stopped", "agent_error"):
-            # Clean up any pending stream bubble that didn't get a commit (e.g. interrupted)
-            if self._stream_start_pos >= 0:
-                cursor = self._agent_feed.textCursor()
-                cursor.setPosition(self._stream_start_pos)
-                cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
-                cursor.removeSelectedText()
-                self._stream_start_pos = -1
-                self._stream_plain_parts = []
-            extra = esc(json.dumps(data, ensure_ascii=False)[:2000])
-            self._append_feed_html(
-                f'<div class="rvmeta">[{esc(ts)}] {esc(kind)} {extra}</div>'
-            )
+            # Drop any half-streamed text that never got a commit (e.g. interrupted).
+            if getattr(self, "_stream_active", False):
+                self._stream_render_timer.stop()
+                self._stream_active = False
+                self._stream_text = ""
+                self._render_agent_feed()
+            if kind == "agent_error":
+                msg = esc(str(data.get("message", "The agent hit an error.")))
+                self._append_feed_html(
+                    f'<div class="rverror"><span class="rverrglyph">&#9888;</span> {msg}</div>'
+                )
+            elif kind == "agent_stopped":
+                self._append_feed_html('<div class="rvstopped">Stopped.</div>')
+            # agent_done is silent: the answer already stands on its own.
             return
 
         blob = esc(json.dumps(data, ensure_ascii=False)[:4000])

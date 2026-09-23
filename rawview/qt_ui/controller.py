@@ -817,16 +817,24 @@ class RawViewQtController(QObject):
 
             def run() -> None:
                 emit("agent_generating", {"active": True})
+                errored = False
                 try:
                     session.run_turn(text, emit=emit)
-                    emit("agent_done", {})
                 except ClaudeCodeUnavailable as e:
+                    errored = True
                     emit("agent_error", {"message": str(e)})
                 except Exception as e:
+                    errored = True
                     logger.exception("claude code turn")
                     emit("agent_error", {"message": str(e), "trace": traceback.format_exc()})
                 finally:
+                    stopped = self._agent_stop_event.is_set()
                     self._agent_stop_event.clear()
+                    # Exactly one terminal event: error already sent above, else stopped or done.
+                    if not errored:
+                        emit("agent_stopped", {"reason": "interrupted"} if stopped else {})
+                        if not stopped:
+                            emit("agent_done", {})
                     emit("agent_generating", {"active": False})
 
             self._agent_thread = threading.Thread(target=run, name="rawview-claude-code", daemon=True)
