@@ -600,6 +600,14 @@ class RawViewQtController(QObject):
             return
         low = text.lower()
         if low == "/summarize" or low.startswith("/summarize "):
+            if self.uses_claude_code():
+                # Claude Code keeps its own conversation via --resume; there is no local transcript
+                # to compress, so /summarize does not apply here.
+                self.agent_event.emit(
+                    "agent_notice",
+                    {"message": "/summarize does not apply to the Claude Code backend - it manages its own context."},
+                )
+                return
             cred_err = self.agent_credentials_error()
             if cred_err:
                 self.agent_event.emit("agent_error", {"message": cred_err})
@@ -807,6 +815,7 @@ class RawViewQtController(QObject):
             if not claude_path:
                 emit("agent_error", {"message": "The claude CLI was not found. Set its path in Settings."})
                 return
+            first_turn = self._claude_session is None or self._claude_session._session_id is None
             if self._claude_session is None:
                 self._claude_session = ClaudeCodeSession(
                     claude_path=claude_path,
@@ -814,6 +823,10 @@ class RawViewQtController(QObject):
                     mcp_command=rawview_mcp_command(),
                 )
             session = self._claude_session
+            if first_turn and text.strip():
+                # No Haiku title call on this backend; derive a short one from the first prompt.
+                title = " ".join(text.strip().split())[:48]
+                emit("chat_title", {"title": title})
 
             def run() -> None:
                 emit("agent_generating", {"active": True})
