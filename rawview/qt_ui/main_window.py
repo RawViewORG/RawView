@@ -26,7 +26,16 @@ from PySide6.QtCore import (
     QUrl,
     QUrlQuery,
 )
-from PySide6.QtGui import QAction, QFont, QGuiApplication, QKeySequence, QShortcut, QTextCursor, QTextDocumentFragment
+from PySide6.QtGui import (
+    QAction,
+    QFont,
+    QGuiApplication,
+    QKeySequence,
+    QShortcut,
+    QTextCursor,
+    QTextDocumentFragment,
+    QTextOption,
+)
 from PySide6.QtWidgets import (
     QStackedWidget,
     QAbstractItemView,
@@ -715,6 +724,12 @@ class MainWindow(QMainWindow):
         self._agent_feed.setOpenExternalLinks(False)
         self._agent_feed.anchorClicked.connect(self._on_agent_feed_anchor)
         self._agent_feed.setPlaceholderText("Agent activity (tools, results) streams here when enabled.")
+        # Wrap everything, including long unbroken tokens (hex, JSON, addresses) and <pre> blocks,
+        # so the feed never scrolls off to the right - "lines go into infinity" was Qt not wrapping
+        # pre-formatted content or wordless strings.
+        self._agent_feed.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
+        self._agent_feed.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self._agent_feed.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         # Throttles the setHtml rebuild while streaming so token bursts do not thrash the renderer.
         self._stream_render_timer = QTimer(self)
         self._stream_render_timer.setSingleShot(True)
