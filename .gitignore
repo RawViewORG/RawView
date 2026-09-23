@@ -35,3 +35,12 @@ rawview.env
 # Ghidra macOS natives are built per-architecture on the macOS builder
 # (rawview.scripts.collect_ghidra_natives), never committed.
 rawview/ghidra_natives/
+
+# --- Runtime state written by the app while it runs (never for git) ---
+/ghidra_projects/
+/build_tools/
+/work/
+/work_recovery/
+/re_recovery/
+/ui_state.ini
+/first_run_tutorial_done
