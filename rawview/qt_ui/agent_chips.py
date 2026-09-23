@@ -48,7 +48,9 @@ def _pill(text: str, tooltip: str, on_click: Callable[[], None], *, object_name:
     b.setCursor(Qt.CursorShape.PointingHandCursor)
     b.setAutoDefault(False)
     b.setFlat(True)
-    b.clicked.connect(on_click)
+    # QPushButton.clicked emits a `checked` bool; swallow it so it can't override the
+    # prompt captured in on_click (that bug sent False to the prompt box instead of the text).
+    b.clicked.connect(lambda _checked=False: on_click())
     b.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
     return b
 
