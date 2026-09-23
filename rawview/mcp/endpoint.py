@@ -121,21 +121,24 @@ def _make_handler(endpoint: RawViewMcpEndpoint) -> type[BaseHTTPRequestHandler]:
         def log_message(self, fmt: str, *args: Any) -> None:
             logger.debug("mcp endpoint: " + fmt, *args)
 
+        def _write(self, code: int, body: bytes) -> None:
+            # A client that hangs up mid-request (cancelled tool call, closed session) leaves a
+            # broken/reset socket; that is normal, not a server fault, so swallow it quietly
+            # instead of letting socketserver dump a traceback.
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                logger.debug("mcp endpoint: client disconnected before the response was sent")
+
         def _reject(self, code: int, message: str) -> None:
-            body = json.dumps({"error": message}).encode("utf-8")
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._write(code, json.dumps({"error": message}).encode("utf-8"))
 
         def _send(self, payload: dict[str, Any]) -> None:
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._write(200, json.dumps(payload).encode("utf-8"))
 
         def _authorized(self) -> bool:
             if self.headers.get("Origin"):
