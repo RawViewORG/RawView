@@ -176,6 +176,8 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(_ic)
         self.resize(1400, 900)
         self._did_show_reconcile = False
+        # Whether a usable saved geometry was restored; drives maximize-by-default in present().
+        self._had_saved_geometry = False
 
         self._ctrl = RawViewQtController(no_agent=self._no_agent)
         self._ui_settings = QSettings(str(user_data_dir() / "ui_state.ini"), QSettings.Format.IniFormat)
@@ -916,6 +918,7 @@ class MainWindow(QMainWindow):
         geom = self._ui_settings.value("geometry")
         if isinstance(geom, QByteArray) and not geom.isEmpty():
             self.restoreGeometry(geom)
+            self._had_saved_geometry = True
             self._shrink_window_client_to_primary_screen()
         if isinstance(app, QApplication):
             app.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
@@ -1050,9 +1053,30 @@ class MainWindow(QMainWindow):
         y = min(max(fg.y(), avail.top() + margin), max(avail.top() + margin, avail.bottom() - fg.height() - margin))
         self.move(x, y)
 
+    def present(self) -> None:
+        """
+        Show the window, maximized by default.
+
+        RawView is an IDE-class window with several docks; opening it windowed and relying on the
+        desktop's maximize action fails on window managers that will not do it, so it opens
+        maximized. The last session's maximized state is remembered (``was_maximized``), and when
+        that key is absent - every install predating this - it defaults to maximized, so the window
+        fills the screen without any help from the desktop. A user who deliberately runs it
+        windowed has that remembered and honored on the next launch.
+        """
+        val = self._ui_settings.value("was_maximized", True)
+        was_max = val if isinstance(val, bool) else str(val).lower() in ("true", "1")
+        if was_max or not self._had_saved_geometry:
+            self.showMaximized()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
     def _persist_ui_layout(self) -> None:
         self._ui_settings.setValue("geometry", self.saveGeometry())
         self._ui_settings.setValue("windowstate", self.saveState(_UI_STATE_VERSION))
+        self._ui_settings.setValue("was_maximized", self.isMaximized() or self.isFullScreen())
         self._ui_settings.sync()
 
     def _apply_theme(self) -> None:

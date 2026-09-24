@@ -93,9 +93,7 @@ def run_qt_app(*, no_agent: bool = False) -> int:
         disarm_prewarm_watchdog()
         boot_finished = True
         splash.close()
-        win.show()
-        win.raise_()
-        win.activateWindow()
+        win.present()
 
         def maybe_first_run_tutorial() -> None:
             from rawview.qt_ui.first_run import is_tutorial_complete
