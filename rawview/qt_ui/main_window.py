@@ -98,6 +98,41 @@ from rawview.qt_ui.work_dock import WorkDockPanel
 _UI_STATE_VERSION = 2
 
 
+def _highlight_code(code: str, lang: str, *, style: str) -> str:
+    """
+    Syntax-highlight a code block into inline HTML (no <pre>, so it survives in a feed card).
+
+    Pygments with noclasses+nowrap emits colored <span> runs and nothing structural; newlines
+    become <br/> and the whole thing sits in a monospace block span. Falls back to plain escaped
+    monospace if Pygments or the language is unavailable - a code block must never crash the feed.
+    """
+    try:
+        from pygments import highlight
+        from pygments.formatters import HtmlFormatter
+        from pygments.lexers import get_lexer_by_name, guess_lexer
+        from pygments.util import ClassNotFound
+    except Exception:  # noqa: BLE001 - pygments optional; degrade gracefully
+        body = html.escape(code).replace("\n", "<br/>")
+        return f'<span style="font-family:Consolas,monospace;">{body}</span>'
+    try:
+        lexer = get_lexer_by_name(lang) if lang else guess_lexer(code)
+    except (ClassNotFound, ValueError):
+        try:
+            lexer = get_lexer_by_name("text")
+        except ClassNotFound:
+            body = html.escape(code).replace("\n", "<br/>")
+            return f'<span style="font-family:Consolas,monospace;">{body}</span>'
+    try:
+        out = highlight(code, lexer, HtmlFormatter(noclasses=True, nowrap=True, style=style))
+    except Exception:  # noqa: BLE001
+        body = html.escape(code).replace("\n", "<br/>")
+        return f'<span style="font-family:Consolas,monospace;">{body}</span>'
+    out = out.replace("\n", "<br/>")
+    return (
+        '<span style="font-family:Consolas,monospace; font-size:9.5pt;">' + out + "</span>"
+    )
+
+
 def _inline_html(inner: str) -> str:
     """
     Flatten Qt's block-level markdown HTML into inline HTML that renders inside a message card.
@@ -312,14 +347,28 @@ class MainWindow(QMainWindow):
         and the role chip, so the feed collapses into one undifferentiated blob. Strip the wrapper
         and the document <style> so only the body's inner markup remains and the card CSS applies.
         """
+        # Pull fenced code blocks out first: Qt's markdown drops the language and its <pre> breaks
+        # the card, so each block is highlighted separately and spliced back in as inline HTML.
+        style = "friendly" if self._ctrl.settings.rawview_theme == "light" else "monokai"
+        blocks: list[str] = []
+
+        def _stash(mm: re.Match[str]) -> str:
+            lang = (mm.group(1) or "").strip()
+            code = mm.group(2)
+            blocks.append(_highlight_code(code, lang, style=style))
+            return f"\n\nRVCODEBLK{len(blocks) - 1}ENDRVCB\n\n"
+
+        staged = re.sub(r"```([\w+-]*)\n(.*?)```", _stash, text, flags=re.DOTALL)
         try:
-            frag = QTextDocumentFragment.fromMarkdown(text)
+            frag = QTextDocumentFragment.fromMarkdown(staged)
             full = frag.toHtml()
         except (AttributeError, TypeError):
-            return html.escape(text).replace("\n", "<br/>")
+            return html.escape(staged).replace("\n", "<br/>")
         m = re.search(r"<body[^>]*>(.*)</body>", full, re.DOTALL | re.IGNORECASE)
-        inner = m.group(1) if m else full
-        return _inline_html(inner)
+        inner = _inline_html(m.group(1) if m else full)
+        for i, block in enumerate(blocks):
+            inner = inner.replace(f"RVCODEBLK{i}ENDRVCB", block)
+        return inner
 
     def _on_agent_feed_anchor(self, url: QUrl) -> None:
         if url.scheme() != "rvexpand":

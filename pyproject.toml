@@ -25,6 +25,8 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "psutil>=5.9.0",
     "qtawesome>=1.3.0",
+    # Syntax highlighting for code blocks in the agent feed (pure Python, small).
+    "pygments>=2.17",
 ]
 
 [project.optional-dependencies]
