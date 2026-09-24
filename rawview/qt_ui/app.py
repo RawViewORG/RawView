@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 
@@ -30,7 +31,30 @@ def _center_on_screen(app: QApplication, widget) -> None:
     widget.move(geo.x() + (geo.width() - w) // 2, geo.y() + (geo.height() - h) // 2)
 
 
+def _install_qt_excepthook() -> None:
+    """
+    Keep one unhandled exception in a Qt slot from killing the whole app.
+
+    PySide6 routes an exception raised inside a signal/slot or event handler through
+    ``sys.excepthook``; with the default hook the process aborts, so a single bad callback took
+    RawView's whole window down (that was the pill-click crash). This logs the traceback and lets
+    the event loop keep running, so the app survives a faulty handler instead of vanishing.
+    KeyboardInterrupt still exits, so Ctrl-C in a terminal works.
+    """
+    log = logging.getLogger("rawview")
+    prev = sys.excepthook
+
+    def hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            prev(exc_type, exc, tb)
+            return
+        log.error("Unhandled exception (kept alive)", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = hook
+
+
 def run_qt_app(*, no_agent: bool = False) -> int:
+    _install_qt_excepthook()
     app = QApplication(sys.argv)
     app.setApplicationName("RawView")
     app.setOrganizationName("RawView")
