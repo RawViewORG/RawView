@@ -1,6 +1,29 @@
 # Changelog
 
-## Unreleased
+## 1.4.0
+
+### Agent dock: a real chat UI, on your Claude Code subscription
+
+The Agent dock was rebuilt. It runs on the Claude Code CLI with no API key (pick
+"Claude Code (your subscription)" in Settings), drives the same Ghidra tools over
+MCP, and renders as a proper chat: per-role cards with avatars, syntax-highlighted
+code blocks (Pygments), long-line wrapping, an animated working indicator, a
+welcome screen and one-tap quick actions. The feed previously collapsed every
+message into one unstyled blob because Qt drops class styling on inserted HTML;
+it is now rendered as one styled document so cards, chips and separation apply.
+
+### Fixes
+
+- The window opens maximized by default, so it fills the screen without relying on
+  the desktop's maximize action (which some window managers refuse to apply).
+- One unhandled exception in a Qt slot no longer aborts the whole app; PySide6
+  would otherwise terminate the process, which read as a random crash. Exceptions
+  are logged and the app stays alive.
+- Welcome and quick-action buttons sent a stray boolean instead of their prompt.
+- The agent feed wrapped nothing, so long hex/JSON/disassembly scrolled off to the
+  right forever.
+- Claude Code: /summarize no longer errors, live "thinking" no longer flickers, a
+  turn emits exactly one terminal event, and chats get a title.
 
 ### Linux: the sandbox made the app unusable, twice
 
