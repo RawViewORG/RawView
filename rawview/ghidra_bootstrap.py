@@ -37,7 +37,7 @@ def _ssl_context() -> ssl.SSLContext:
 # resolve_latest_ghidra_public_zip_url() picks the newest GitHub PUBLIC release.
 DEFAULT_GHIDRA_ZIP_URL = (
     "https://github.com/NationalSecurityAgency/ghidra/releases/download/"
-    "Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip"
+    "Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip"
 )
 
 

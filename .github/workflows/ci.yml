@@ -129,7 +129,7 @@ jobs:
 
       - name: Download and extract Ghidra
         run: |
-          url="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.3_build/ghidra_12.1.3_PUBLIC_20260817.zip"
+          url="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.4_build/ghidra_12.1.4_PUBLIC_20260921.zip"
           zip_path="$RUNNER_TEMP/ghidra.zip"
           extract_dir="$RUNNER_TEMP/ghidra"
           curl -fL --retry 3 -o "$zip_path" "$url"

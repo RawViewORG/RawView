@@ -9,7 +9,7 @@ from pathlib import Path
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root))
-    _default_ghidra_versions = ("ghidra_12.1.3_PUBLIC", "ghidra_12.0.4_PUBLIC", "ghidra_11.4.3_PUBLIC")
+    _default_ghidra_versions = ("ghidra_12.1.4_PUBLIC", "ghidra_12.1.3_PUBLIC", "ghidra_12.0.4_PUBLIC", "ghidra_11.4.3_PUBLIC")
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")))
     else:
