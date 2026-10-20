@@ -16,6 +16,7 @@ from typing import Any
 from PySide6.QtCore import QObject, Signal
 
 from rawview.agent.anthropic_backoff import AnthropicBackoffInterrupted
+from rawview.agent.claude_model_limits import model_binds_thinking_to_history
 from rawview.agent.brain import AgentBrain
 from rawview.agent.tools import AgentBatchToolPort
 from rawview.agent.conversation_summarize import (
@@ -99,7 +100,7 @@ class RawViewQtController(QObject):
         self._current_address: str = ""
         self._hex_dump_size: int = 4096
         self._hex_dump_bpl: int = 16
-        self.agent_memory = ConversationMemory(max_messages=self.settings.agent_history_messages)
+        self.agent_memory = self._new_agent_memory()
         self._brain: AgentBrain | None = None
         self._mcp_endpoint: Any = None
         self._claude_session: Any = None
@@ -123,8 +124,14 @@ class RawViewQtController(QObject):
         if _bridge_restart_fingerprint(self.settings) != old_fp:
             self.shutdown_bridge()
         if self.agent_enabled:
-            self.agent_memory = ConversationMemory(max_messages=self.settings.agent_history_messages)
+            self.agent_memory = self._new_agent_memory()
         self.start_mcp_endpoint()
+
+    def _new_agent_memory(self) -> ConversationMemory:
+        return ConversationMemory(
+            max_messages=self.settings.agent_history_messages,
+            strip_thinking_on_trim=model_binds_thinking_to_history(self.settings.anthropic_model),
+        )
 
     def prewarm_bridge_if_enabled(self) -> None:
         """Start Ghidra JVM on startup when configured (runs in a background thread)."""

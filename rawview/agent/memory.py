@@ -10,6 +10,10 @@ class ConversationMemory:
     """Rolling Anthropic message list with optional pinned system context."""
 
     max_messages: int = 24
+    # Set for models that bind thinking blocks to the history before them (see
+    # claude_model_limits.model_binds_thinking_to_history): once the window drops a
+    # message, every thinking block still held is invalid and would be an HTTP 400.
+    strip_thinking_on_trim: bool = False
     _messages: deque[dict[str, Any]] = field(default_factory=deque)
 
     def add_user(self, content: str | list) -> None:
@@ -83,5 +87,23 @@ class ConversationMemory:
         self._trim()
 
     def _trim(self) -> None:
+        trimmed = False
         while len(self._messages) > self.max_messages:
             self._messages.popleft()
+            trimmed = True
+        if trimmed and self.strip_thinking_on_trim:
+            self._strip_thinking()
+
+    def _strip_thinking(self) -> None:
+        for m in self._messages:
+            content = m.get("content")
+            if m.get("role") != "assistant" or not isinstance(content, list):
+                continue
+            kept = [
+                b for b in content
+                if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
+            ]
+            # Thinking is only stored next to a tool_use, so this never empties a turn;
+            # keep the original rather than send an empty assistant message if it did.
+            if kept and len(kept) != len(content):
+                m["content"] = kept
