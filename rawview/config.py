@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     )
 
     anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY")
-    anthropic_model: str = Field(default="claude-opus-5", validation_alias="ANTHROPIC_MODEL")
+    anthropic_model: str = Field(default="claude-opus-5-5", validation_alias="ANTHROPIC_MODEL")
 
     # Which backend the agent talks to. "anthropic" keeps the fields above, so existing
     # installs and rawview.env files are unaffected. Every other preset is served by the

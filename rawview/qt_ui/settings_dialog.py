@@ -86,6 +86,10 @@ class SettingsDialog(QDialog):
         self._classpath.setPlaceholderText("Optional full Java classpath (overrides auto-discovery)")
         self._classpath.setMaximumHeight(80)
         _KNOWN_MODELS = [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-1",
             "claude-opus-5",
             "claude-opus-4-8",
             "claude-opus-4-7",
@@ -786,7 +790,7 @@ class SettingsDialog(QDialog):
             data["LLM_MAX_TOKENS"] = str(self._llm_max_tokens.value())
             data["LLM_SUPPORTS_TOOLS"] = "true" if self._llm_tools.isChecked() else "false"
             data["ANTHROPIC_API_KEY"] = self._api_key.text().strip()
-            data["ANTHROPIC_MODEL"] = self._model.currentText().strip() or "claude-opus-5"
+            data["ANTHROPIC_MODEL"] = self._model.currentText().strip() or "claude-opus-5-5"
             data["CLAUDE_CODE_PATH"] = self._cc_path.text().strip()
             data["CLAUDE_CODE_MODEL"] = self._cc_model.text().strip()
             data["AGENT_MAX_TURNS"] = str(self._max_turns.value())

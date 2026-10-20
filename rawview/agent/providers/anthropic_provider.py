@@ -134,11 +134,11 @@ class AnthropicProvider(LLMProvider):
             "messages": messages,
             "tools": tools,
         }
-        # Opus 4.7+/4.8/5, Sonnet 5, and Fable/Mythos 5 reject temperature (HTTP 400).
+        # Opus 4.7+, Sonnet 5+, Haiku 5.5, and Fable/Mythos reject temperature (HTTP 400).
         if model_accepts_sampling_params(self._model):
             params["temperature"] = self._temperature
         # Haiku rejects effort; xhigh only exists on some models (helper clamps/omits).
-        # Opus 5 also caps effort at "high" when thinking is off.
+        # Opus 5 and Haiku 5.5 also cap effort at "high" when thinking is off.
         eff = effort_for_model(
             self._model, self._effort, thinking_disabled=not self._extended_thinking
         )
@@ -165,11 +165,12 @@ class AnthropicProvider(LLMProvider):
         elif not model_thinks_by_default(self._model):
             params["max_tokens"] = 8192
         elif model_rejects_disabled_thinking(self._model):
-            # Fable/Mythos 5 think unconditionally and 400 on an explicit disable, so
+            # Opus 5.5, Sonnet 5.5 and Fable/Mythos think unconditionally and 400 on an
+            # explicit disable, so
             # leave the parameter out and give max_tokens room for thinking plus reply.
             params["max_tokens"] = min(16000, max_output_tokens_for_claude_model(self._model))
         else:
-            # Opus 5 / Sonnet 5 think when "thinking" is omitted, so turning it off
+            # Opus 5 / Sonnet 5 / Haiku 5.5 think when "thinking" is omitted, so turning it off
             # has to be explicit.
             params["thinking"] = {"type": "disabled"}
             params["max_tokens"] = 8192
