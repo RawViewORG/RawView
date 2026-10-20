@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.4.1
+
+### Ghidra 12.1.4
+
+The bundled and default Ghidra moves from 12.1.3 to 12.1.4. The fixes that matter when
+the input is hostile:
+
+- **PE and OMF loaders.** A crafted file could overflow the loader's stack and kill the
+  import. Both loaders are fixed.
+- **UNC library paths.** Ghidra no longer follows a UNC path (`\\server\share\...`)
+  that a binary names for its libraries, so importing a sample on Windows can't make
+  Ghidra reach out to a remote share.
+- **x86-64 semantics.** RIP-relative addresses are computed correctly, and 32-bit writes
+  to partial registers now zero the upper half the way the CPU does. Both change
+  decompiler output on ordinary code.
+- Also fixed upstream: AArch64 load/store operand formatting, SuperH `shad`/`shld`,
+  NDS32 `fdiv`/`fmul`, a large Hexagon revision, and GhidraScript compile errors that
+  were hidden from the user.
+
+Packages ship with 12.1.4. If you point `GHIDRA_INSTALL_DIR` at your own Ghidra, move it
+to a 12.1.4 build and recompile the bridge (`python -m rawview.scripts.compile_java`) to
+pick up these fixes.
+
+### Claude Opus 5.5, Sonnet 5.5, Haiku 5.5 and Fable 5.1
+
+- The Anthropic provider now defaults to Claude Opus 5.5 (`claude-opus-5-5`), and
+  Sonnet 5.5, Haiku 5.5 and Fable 5.1 are in the model list. A model you set yourself
+  (in Settings or `ANTHROPIC_MODEL`) is left alone. The Claude Code backend is
+  unaffected; it has its own model setting.
+- You could already type these IDs, but RawView sent requests they reject. With
+  extended thinking off it sent `thinking: disabled` to Opus 5.5 and Sonnet 5.5, which
+  both refuse it. Haiku 5.5 was treated as Haiku 4.5: a fixed thinking budget, no
+  effort setting, and an 8K output cap instead of 128K. Each model now gets parameters
+  it accepts.
+- On these models a thinking block is only valid while everything before it in the
+  conversation is unchanged, and accounts created on or after August 31, 2026 get an
+  error when that is broken. The agent keeps a rolling window (64 messages by default),
+  so a long session would start failing once its oldest messages rolled off. When the
+  window drops a message, RawView now drops the thinking blocks it was holding too,
+  which is what the API does itself in its tolerant mode.
+
 ## 1.4.0
 
 ### Agent dock: a real chat UI, on your Claude Code subscription
